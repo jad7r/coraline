@@ -1,0 +1,33 @@
+# Coreline Slack Orchestrator Dependencies
+#
+# Version floors chosen for Python 3.14 compatibility. The original archived
+# pins (fastapi 0.109 / pydantic 2.6 / redis 5.0) predate 3.14 and have no
+# building wheels on it (pydantic-core fails to compile). See PR notes.
+
+# === Web Framework ===
+fastapi>=0.115
+uvicorn[standard]>=0.30
+
+# === Data Validation ===
+# Upper-bounded below the next major: the models use v2 APIs (ConfigDict,
+# field_validator, NoDecode) that would change under a v3 release.
+pydantic>=2.9,<3
+pydantic-settings>=2.5,<3
+
+# === Redis (Pub/Sub) ===
+redis>=5.0
+
+# === Slack SDK ===
+slack-sdk>=3.27
+
+# === Logging ===
+structlog>=24.1
+
+# === Secrets (env + OS keychain via services.shared) ===
+keyring>=25.0
+
+# === Testing (Development Only) ===
+pytest>=8.0
+pytest-asyncio>=0.24
+fakeredis>=2.20
+httpx>=0.27

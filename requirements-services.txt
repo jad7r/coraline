@@ -1,0 +1,33 @@
+# Revived-services dependency set (ADR-0003).
+# Union of the per-component requirements needed to run the integrated test
+# suite (core/ + autonomous/ + services/ + lib/) green on Python 3.14.
+# Each service also keeps its own pinned requirements.txt for deployment.
+#
+#   python3 -m venv .venv-integration
+#   .venv-integration/bin/pip install -r requirements-services.txt
+#   .venv-integration/bin/python -m pytest core autonomous services lib
+
+# test runners
+pytest
+pytest-asyncio
+pytest-subtests
+
+# crypto / secrets (lib/enclave_adapter, lib/_secrets, keystore)
+pynacl
+keyring
+
+# services: web + redis
+fastapi
+pydantic<3
+pydantic-settings
+uvicorn
+httpx
+requests
+flask
+redis
+fakeredis
+structlog
+slack-sdk
+
+# MCP server (scripts/coreline_mcp_server.py)
+fastmcp

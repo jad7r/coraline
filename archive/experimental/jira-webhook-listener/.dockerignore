@@ -1,0 +1,51 @@
+# Exclude from Docker image build
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+dist/
+build/
+
+# Virtual environments
+venv/
+env/
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+*.log
+
+# Git
+.git/
+.gitignore
+
+# Documentation (not needed in runtime)
+*.md
+docs/
+
+# CI/CD
+.github/
+.gitlab-ci.yml
+
+# Environment files (secrets should come from Secret Manager)
+.env
+.env.*
+*.key
+*.pem
+
+# Temporary files
+*.tmp
+*.bak
+.DS_Store

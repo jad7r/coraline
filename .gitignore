@@ -1,0 +1,17 @@
+.venv/
+.venv-integration/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+coreline-demo/
+coreline-incidents/
+*.log
+.env
+.env.*
+!.env.example
+!.env.template

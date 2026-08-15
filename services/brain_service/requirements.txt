@@ -1,0 +1,42 @@
+# Coreline-Brain Service Dependencies
+#
+# Revived under ADR-0003. Pins relaxed to >= floors with Python 3.14 wheels
+# (the archived exact pins predate 3.14 and no longer build). The service imports
+# and its offline test suite run with only the CORE + TESTING sections below.
+#
+# The INTEGRATIONS section holds optional, advisory providers (LLM, Jira, Slack,
+# cloud secrets). Their imports are deferred in _lib_shim.py, so they are NOT
+# required to import, boot, health-check, or run the offline PIR path. Install
+# them for live operation.
+
+# === Web Framework (CORE) ===
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+
+# === Data Validation (CORE) ===
+pydantic>=2.9.0
+pydantic-settings>=2.5.0
+
+# === Redis Pub/Sub (CORE) ===
+redis>=5.0.1
+
+# === Logging (CORE) ===
+structlog>=24.1.0
+
+# === HTTP Client (CORE) ===
+requests>=2.32.0
+
+# === Optional live integrations (advisory / replaceable — see _lib_shim.py) ===
+# anthropic>=0.39.0            # Claude LLM provider (ADR-0002 §2: replaceable, advisory)
+# jira>=3.8.0                  # Jira incident metadata collector
+# slack-sdk>=3.27.1            # Slack incident logs
+# google-cloud-secret-manager>=2.20.0  # cloud secret backend (env / keyring also supported)
+# cryptography>=43.0.0
+# weasyprint>=62.0             # PIR -> PDF (future Coreline-Vault integration)
+# markdown>=3.7
+
+# === Testing (Development Only) ===
+pytest>=8.3.0
+pytest-asyncio>=0.24.0
+fakeredis>=2.24.0
+httpx>=0.27.0
