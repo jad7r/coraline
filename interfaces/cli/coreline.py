@@ -90,9 +90,8 @@ def _load(home_opt: Optional[str], incident_id: Optional[str]) -> IncidentWorksp
 
 def _banner() -> None:
     art = Text()
-    art.append("  ▄▀█ █▀█ █▀▀ █▀\n", style=C_ACCENT)
-    art.append("  █▀█ █▀▄ ██▄ ▄█", style=C_ACCENT)
-    art.append("   incident-response console", style=C_DIM)
+    art.append("  CORELINE\n", style=C_ACCENT)
+    art.append("  deterministic incident-response console", style=C_DIM)
     console.print(Panel(art, border_style="cyan", box=box.HEAVY, padding=(0, 2)))
 
 
@@ -174,6 +173,94 @@ def evidence_add(
         t.add_row("note", note)
     console.print(Panel(t, title="[bold]EVIDENCE SEALED[/]", border_style="cyan",
                         box=box.ROUNDED))
+
+
+# ---- doctor / use / close ---------------------------------------------------- #
+
+@app.command()
+def doctor(home: Optional[str] = typer.Option(None, "--home")):
+    """Check local Coreline workspace health and integrity."""
+    h = _home(home)
+    ids = IncidentWorkspace.list_incidents(h)
+    cur = IncidentWorkspace.current_id(h)
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("home", Text(str(h), style=C_ACCENT))
+    table.add_row("incidents", str(len(ids)))
+    table.add_row("active", cur or "none")
+
+    problems = []
+    active_ws = None
+    if cur:
+        try:
+            active_ws = IncidentWorkspace.load(h, cur)
+        except WorkspaceError as e:
+            problems.append(str(e))
+    elif ids:
+        problems.append("no active incident selected")
+
+    if active_ws:
+        v = active_ws.verify()
+        table.add_row("active status", _status(active_ws.state.get("status", "")))
+        table.add_row("manifest signature", "valid" if v["manifest_signature"] else "invalid")
+        table.add_row("custody chain", "intact" if v["custody_chain"] else "broken")
+        table.add_row("audit chain", "intact" if v["audit_chain"] else "broken")
+        if not v["manifest_signature"]:
+            problems.append("active manifest signature invalid")
+        if not v["custody_chain"]:
+            problems.append("active custody chain broken")
+        if not v["audit_chain"]:
+            problems.append(f"active audit chain broken at seq {v['audit_bad_seq']}")
+
+    border = "green" if not problems else "yellow"
+    console.print(Panel(table, title="[bold]CORELINE DOCTOR[/]", border_style=border,
+                        box=box.ROUNDED))
+    if problems:
+        for p in problems:
+            console.print(f"[{C_WARN}]! {p}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ workspace ready[/]")
+
+
+@app.command("use")
+def use_incident(
+    incident_id: str = typer.Argument(..., help="Incident ID to make active."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Make an existing incident the active incident."""
+    try:
+        ws = IncidentWorkspace.load(_home(home), incident_id)
+        ws.make_active()
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ active incident set to {ws.incident_id}[/]")
+
+
+@app.command()
+def close(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+    raw: bool = typer.Option(False, "--raw", help="Print raw markdown instead of rendered."),
+):
+    """Generate the final PIR and close the incident."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        md = ws.close_incident(who)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+
+    if raw:
+        console.print(md)
+    else:
+        console.print(Panel(Markdown(md), title="[bold]INCIDENT CLOSED[/]",
+                            border_style="green", box=box.ROUNDED))
+    console.print(f"[{C_DIM}]final PIR written to {ws.report_path}[/]")
 
 
 # ---- timeline show ----------------------------------------------------------- #

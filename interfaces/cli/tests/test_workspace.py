@@ -202,6 +202,12 @@ def test_close_incident_generates_pir_and_locks(home: Path, evidence_file: Path)
     # signature still valid after closure
     assert ws.verify()["manifest_signature"] is True
 
+    with pytest.raises(WorkspaceError, match="evidence intake is locked"):
+        ws.add_evidence(str(evidence_file), note="late evidence", actor="a")
+
+    with pytest.raises(WorkspaceError, match="already closed"):
+        ws.close_incident(actor="a")
+
 
 def test_list_incidents(home: Path):
     a = _declare(home)

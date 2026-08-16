@@ -17,7 +17,7 @@ def _run(args, home: Path):
 def test_help_lists_all_commands():
     res = runner.invoke(app, ["--help"])
     assert res.exit_code == 0
-    for cmd in ("declare", "evidence", "timeline", "status", "report"):
+    for cmd in ("declare", "doctor", "evidence", "timeline", "status", "report", "use", "close"):
         assert cmd in res.output
 
 
@@ -45,6 +45,43 @@ def test_full_flow_declare_evidence_timeline_status_report(tmp_path: Path):
     r = _run(["report"], home)
     assert r.exit_code == 0, r.output
     assert "POST-INCIDENT REPORT" in r.output
+
+
+def test_doctor_use_and_close_operator_flow(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "alert.log"
+    ev.write_text("exfil evidence\n", encoding="utf-8")
+
+    first = _run(["declare", "--title", "First", "--severity", "SEV3"], home)
+    assert first.exit_code == 0, first.output
+    first_id = (home / "CURRENT").read_text(encoding="utf-8").strip()
+
+    second = _run(["declare", "--title", "Second", "--severity", "SEV2"], home)
+    assert second.exit_code == 0, second.output
+
+    r = _run(["use", first_id], home)
+    assert r.exit_code == 0, r.output
+    assert f"active incident set to {first_id}" in r.output
+
+    r = _run(["doctor"], home)
+    assert r.exit_code == 0, r.output
+    assert "CORELINE DOCTOR" in r.output
+    assert "workspace ready" in r.output
+
+    r = _run(["evidence", "add", "--file", str(ev), "--note", "SIEM alert"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["close"], home)
+    assert r.exit_code == 0, r.output
+    assert "INCIDENT CLOSED" in r.output
+
+    r = _run(["evidence", "add", "--file", str(ev)], home)
+    assert r.exit_code == 1
+    assert "evidence intake is locked" in r.output
+
+    r = _run(["close"], home)
+    assert r.exit_code == 1
+    assert "already closed" in r.output
 
 
 def test_commands_fail_cleanly_with_no_active_incident(tmp_path: Path):

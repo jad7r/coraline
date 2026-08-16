@@ -396,6 +396,8 @@ class IncidentWorkspace:
         RESOLVED when gates are green), then marks the incident CLOSED. After this the
         CLI/GUI treat evidence intake as locked.
         """
+        if self.is_closed:
+            raise WorkspaceError(f"incident {self.incident_id} is already closed")
         when = when or _now()
         report_md = self.generate_report(actor, when)
         self.state["status"] = "CLOSED"
@@ -443,6 +445,8 @@ class IncidentWorkspace:
         actor: str,
         when: Optional[datetime] = None,
     ) -> Dict[str, Any]:
+        if self.is_closed:
+            raise WorkspaceError(f"incident {self.incident_id} is closed; evidence intake is locked")
         when = when or _now()
         src = Path(file_path)
         if not src.exists() or not src.is_file():
