@@ -17,7 +17,7 @@ def _run(args, home: Path):
 def test_help_lists_all_commands():
     res = runner.invoke(app, ["--help"])
     assert res.exit_code == 0
-    for cmd in ("declare", "doctor", "evidence", "timeline", "status", "report", "use", "close"):
+    for cmd in ("declare", "doctor", "evidence", "timeline", "status", "report", "use", "close", "verify"):
         assert cmd in res.output
 
 
@@ -68,8 +68,16 @@ def test_doctor_use_and_close_operator_flow(tmp_path: Path):
     assert "CORELINE DOCTOR" in r.output
     assert "workspace ready" in r.output
 
+    r = _run(["verify"], home)
+    assert r.exit_code == 0, r.output
+    assert "verification passed" in r.output
+
     r = _run(["evidence", "add", "--file", str(ev), "--note", "SIEM alert"], home)
     assert r.exit_code == 0, r.output
+
+    r = _run(["verify", "--all"], home)
+    assert r.exit_code == 0, r.output
+    assert "verification passed for 2 incident" in r.output
 
     r = _run(["close"], home)
     assert r.exit_code == 0, r.output
@@ -82,6 +90,32 @@ def test_doctor_use_and_close_operator_flow(tmp_path: Path):
     r = _run(["close"], home)
     assert r.exit_code == 1
     assert "already closed" in r.output
+
+
+def test_verify_fails_when_stored_evidence_is_modified(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "alert.log"
+    ev.write_text("exfil evidence\n", encoding="utf-8")
+
+    r = _run(["declare", "--title", "DB Exfiltration Alert", "--severity", "SEV1"], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["evidence", "add", "--file", str(ev), "--note", "SIEM alert"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["verify"], home)
+    assert r.exit_code == 0, r.output
+
+    stored = next((home / (home / "CURRENT").read_text(encoding="utf-8").strip() / "store").rglob("alert.log"))
+    stored.write_text("modified evidence\n", encoding="utf-8")
+
+    r = _run(["verify"], home)
+    assert r.exit_code == 1
+    assert "verification failed" in r.output
+    assert "bad hash" in r.output
+
+    r = _run(["doctor"], home)
+    assert r.exit_code == 1
+    assert "stored evidence artifacts failed verification" in r.output
 
 
 def test_commands_fail_cleanly_with_no_active_incident(tmp_path: Path):

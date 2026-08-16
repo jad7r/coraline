@@ -207,12 +207,15 @@ def doctor(home: Optional[str] = typer.Option(None, "--home")):
         table.add_row("manifest signature", "valid" if v["manifest_signature"] else "invalid")
         table.add_row("custody chain", "intact" if v["custody_chain"] else "broken")
         table.add_row("audit chain", "intact" if v["audit_chain"] else "broken")
+        table.add_row("storage artifacts", "verified" if v["storage_artifacts"] else "failed")
         if not v["manifest_signature"]:
             problems.append("active manifest signature invalid")
         if not v["custody_chain"]:
             problems.append("active custody chain broken")
         if not v["audit_chain"]:
             problems.append(f"active audit chain broken at seq {v['audit_bad_seq']}")
+        if not v["storage_artifacts"]:
+            problems.append("active stored evidence artifacts failed verification")
 
     border = "green" if not problems else "yellow"
     console.print(Panel(table, title="[bold]CORELINE DOCTOR[/]", border_style=border,
@@ -222,6 +225,73 @@ def doctor(home: Optional[str] = typer.Option(None, "--home")):
             console.print(f"[{C_WARN}]! {p}[/]")
         raise typer.Exit(code=1)
     console.print(f"[{C_OK}]✓ workspace ready[/]")
+
+
+@app.command()
+def verify(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    all_incidents: bool = typer.Option(False, "--all", help="Verify every incident in the store."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Verify manifests, custody, audit chain, and stored local evidence artifacts."""
+    h = _home(home)
+    workspaces = []
+    try:
+        if all_incidents:
+            ids = IncidentWorkspace.list_incidents(h)
+            workspaces = [IncidentWorkspace.load(h, iid) for iid in ids]
+        else:
+            workspaces = [IncidentWorkspace.load(h, incident_id)
+                          if incident_id else IncidentWorkspace.load_current(h)]
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+
+    if not workspaces:
+        console.print(f"[{C_DIM}]no incidents under {h}[/]")
+        return
+
+    failed = []
+    for ws in workspaces:
+        v = ws.verify()
+        ok = _verification_ok(v)
+        if not ok:
+            failed.append(ws.incident_id)
+        console.print(_verification_panel(ws, v, ok))
+
+    if failed:
+        console.print(f"[{C_BAD}]✗ verification failed for {', '.join(failed)}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ verification passed for {len(workspaces)} incident(s)[/]")
+
+
+def _verification_ok(v: dict) -> bool:
+    return all(
+        bool(v[key])
+        for key in ("manifest_signature", "custody_chain", "audit_chain", "storage_artifacts")
+    )
+
+
+def _verification_panel(ws: IncidentWorkspace, v: dict, ok: bool) -> Panel:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("incident", Text(ws.incident_id, style=C_ACCENT))
+    table.add_row("title", ws.state.get("title", ""))
+    table.add_row("status", _status(ws.state.get("status", "")))
+    table.add_row("manifest", "valid" if v["manifest_signature"] else "invalid")
+    table.add_row("custody", "intact" if v["custody_chain"] else f"broken @ {v['custody_bad_index']}")
+    table.add_row("audit", "intact" if v["audit_chain"] else f"broken @ seq {v['audit_bad_seq']}")
+    table.add_row("storage", "verified" if v["storage_artifacts"] else "failed")
+    table.add_row("manifest hash", Text(str(v.get("manifest_hash") or ""), style=C_DIM))
+    if v["storage_missing"]:
+        table.add_row("missing", ", ".join(v["storage_missing"]))
+    if v["storage_bad_hash"]:
+        table.add_row("bad hash", "; ".join(v["storage_bad_hash"]))
+    if v["storage_unverifiable"]:
+        table.add_row("unverifiable", "; ".join(v["storage_unverifiable"]))
+    border = "green" if ok else "red"
+    return Panel(table, title="[bold]VERIFICATION[/]", border_style=border, box=box.ROUNDED)
 
 
 @app.command("use")

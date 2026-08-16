@@ -35,9 +35,10 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+from urllib.parse import unquote, urlparse
 
 from core.evidence._util import canonical_json, to_iso
-from core.evidence.hashing import sha256_bytes
+from core.evidence.hashing import sha256_bytes, sha256_file
 from core.evidence.manifest import EvidenceManifest, build_evidence_item
 from core.evidence.integrity import signing
 from core.storage.local import LocalFileBackend
@@ -492,16 +493,21 @@ class IncidentWorkspace:
 
     # -- verification ---------------------------------------------------------- #
     def verify(self) -> Dict[str, Any]:
-        """Full integrity check: manifest signature, custody chain, audit chain."""
+        """Full integrity check: manifest signature, custody chain, audit chain, storage."""
         result: Dict[str, Any] = {
             "manifest_signature": False,
             "custody_chain": False,
             "audit_chain": False,
+            "storage_artifacts": False,
             "fingerprint": None,
             "manifest_hash": None,
             "custody_bad_index": None,
             "audit_bad_seq": None,
+            "storage_missing": [],
+            "storage_bad_hash": [],
+            "storage_unverifiable": [],
         }
+        manifest = None
         if self._manifest_path.exists() and self._sig_path.exists():
             # Fail closed: any error in reading/decoding/parsing a tampered manifest
             # yields an invalid result, never an exception to the caller.
@@ -523,10 +529,51 @@ class IncidentWorkspace:
                 result["custody_bad_index"] = bad
             except Exception:
                 result["custody_chain"] = False
+        if manifest is not None:
+            storage = self._verify_storage_artifacts(manifest)
+            result.update(storage)
         ok, bad_seq = verify_audit(self._load_audit())
         result["audit_chain"] = ok
         result["audit_bad_seq"] = bad_seq
         return result
+
+    def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
+        missing: List[str] = []
+        bad_hash: List[str] = []
+        unverifiable: List[str] = []
+        stored_uris: Dict[str, str] = {}
+
+        for event in manifest.chain.events:
+            if event.action != "collected" or not event.target:
+                continue
+            details = event.details or {}
+            uri = details.get("stored_uri")
+            if uri:
+                stored_uris[event.target] = str(uri)
+
+        for item in manifest.items:
+            uri = stored_uris.get(item.sha256)
+            if not uri:
+                unverifiable.append(f"{item.sha256}: no stored_uri")
+                continue
+            parsed = urlparse(uri)
+            if parsed.scheme != "file":
+                unverifiable.append(f"{item.sha256}: unsupported uri {uri}")
+                continue
+            path = Path(unquote(parsed.path))
+            if not path.exists() or not path.is_file():
+                missing.append(uri)
+                continue
+            actual = sha256_file(path)
+            if actual != item.sha256:
+                bad_hash.append(f"{uri}: expected {item.sha256}, got {actual}")
+
+        return {
+            "storage_artifacts": not missing and not bad_hash and not unverifiable,
+            "storage_missing": missing,
+            "storage_bad_hash": bad_hash,
+            "storage_unverifiable": unverifiable,
+        }
 
     # -- quality gates --------------------------------------------------------- #
     def gates(self) -> List[Gate]:
@@ -545,6 +592,11 @@ class IncidentWorkspace:
                  v["fingerprint"] or "no signer"),
             Gate("audit", "Audit log tamper-evident", v["audit_chain"],
                  "verified" if v["audit_chain"] else f"broken @ seq {v['audit_bad_seq']}"),
+            Gate("storage", "Stored evidence artifacts present", v["storage_artifacts"],
+                 "verified" if v["storage_artifacts"]
+                 else f"{len(v['storage_missing'])} missing, "
+                      f"{len(v['storage_bad_hash'])} bad hash, "
+                      f"{len(v['storage_unverifiable'])} unverifiable"),
             Gate("report", "PIR generated", report_exists,
                  "present" if report_exists else "not yet generated"),
         ]

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
 import pytest
 
@@ -99,6 +100,30 @@ def test_reload_preserves_signed_state(home: Path, evidence_file: Path):
     v = reloaded.verify()
     assert v["manifest_signature"] and v["custody_chain"] and v["audit_chain"]
     assert reloaded.state["evidence_count"] == 1
+
+
+def test_verify_detects_missing_stored_evidence(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    res = ws.add_evidence(str(evidence_file), note="n", actor="a")
+    stored = Path(unquote(urlparse(res["receipt"].uri).path))
+    stored.unlink()
+
+    v = ws.verify()
+    assert v["storage_artifacts"] is False
+    assert res["receipt"].uri in v["storage_missing"]
+    keys = {g.key: g.passed for g in ws.gates()}
+    assert keys["storage"] is False
+
+
+def test_verify_detects_stored_evidence_hash_mismatch(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    res = ws.add_evidence(str(evidence_file), note="n", actor="a")
+    stored = Path(unquote(urlparse(res["receipt"].uri).path))
+    stored.write_text("changed bytes\n", encoding="utf-8")
+
+    v = ws.verify()
+    assert v["storage_artifacts"] is False
+    assert res["receipt"].uri in v["storage_bad_hash"][0]
 
 
 # ---- tamper detection -------------------------------------------------------- #
