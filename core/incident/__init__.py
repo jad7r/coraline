@@ -1,10 +1,6 @@
-"""Compatibility imports for the Coreline incident workspace.
+"""Incident workspace domain model for Coreline."""
 
-The incident domain model now lives in ``core.incident.workspace``. This module keeps
-older CLI and GUI imports working while those callers are migrated.
-"""
-
-from core.incident.workspace import (
+from .workspace import (
     AuditEntry,
     Gate,
     IncidentWorkspace,

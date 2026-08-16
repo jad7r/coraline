@@ -9,6 +9,7 @@ Modules (each owns one platform responsibility):
 
 | Package | Owns |
 |---|---|
+| `incident/` | local incident workspace, lifecycle metadata, reports, and audit wiring |
 | `state/` | incident state machine (DECLARED→…→CLOSED); authoritative status |
 | `evidence/` | evidence records + the integrity subsystem (`evidence/integrity/`) |
 | `audit/` | append-only, tamper-evident audit log (records AI provenance) |
@@ -19,6 +20,6 @@ Modules (each owns one platform responsibility):
 
 The connector framework lives at the repo-root [`../connectors/`](../connectors/).
 
-> **Phase 0 status:** skeleton only. Packages are empty placeholders except
-> `evidence/integrity/`, into which the PyNaCl crypto core has been lifted. No behavior
-> has been implemented yet — that is Phase 1.
+> **Current status:** `incident/`, `evidence/`, and `storage/` contain executable,
+> tested behavior. The remaining packages are placeholders for upcoming platform
+> responsibilities.

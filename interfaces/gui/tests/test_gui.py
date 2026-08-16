@@ -18,7 +18,7 @@ APP = str(Path(__file__).resolve().parents[1] / "app.py")
 
 def _seed(tmp_path: Path):
     """Create an incident + one evidence item and point CORELINE_HOME at it."""
-    from interfaces.cli.workspace import IncidentWorkspace
+    from core.incident import IncidentWorkspace
 
     home = tmp_path / "incidents"
     ev = tmp_path / "alert.log"

@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from interfaces.cli.workspace import (
+from core.incident import (
     IncidentWorkspace,
     WorkspaceError,
     verify_audit,

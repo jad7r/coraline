@@ -2,7 +2,7 @@
 Coreline — self-hosted web console (Streamlit).
 
 A visual, zero-CLI front-end over the deterministic ``core`` (via
-``interfaces.cli.workspace.IncidentWorkspace``). Everything is buttons, forms, a
+``core.incident.IncidentWorkspace``). Everything is buttons, forms, a
 drag-and-drop evidence dropzone, a color-coded timeline, and green/red integrity badges.
 
 Run via ``./run_gui.sh`` (which calls ``streamlit run interfaces/gui/app.py``).
@@ -14,7 +14,7 @@ from pathlib import Path
 
 import streamlit as st
 
-from interfaces.cli.workspace import (
+from core.incident import (
     IncidentWorkspace,
     WorkspaceError,
     SEVERITIES,

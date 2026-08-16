@@ -11,8 +11,8 @@ A polished, dark-mode SecOps terminal front-end (Typer + Rich) over the determin
     python -m interfaces.cli.coreline report
 
 Crypto-bearing operations (SHA-256, Ed25519 manifest signing, chain of custody,
-write-only storage) run through the mature, tested ``core`` layer. Incident state and
-the hash-linked audit log are owned by ``interfaces.cli.workspace``.
+write-only storage), incident state, and the hash-linked audit log run through the
+tested ``core`` layer.
 """
 from __future__ import annotations
 
@@ -27,7 +27,7 @@ from rich.text import Text
 from rich.markdown import Markdown
 from rich import box
 
-from interfaces.cli.workspace import (
+from core.incident import (
     IncidentWorkspace,
     WorkspaceError,
     SEVERITIES,
