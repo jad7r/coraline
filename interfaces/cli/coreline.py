@@ -16,6 +16,10 @@ tested ``core`` layer.
 """
 from __future__ import annotations
 
+import base64
+import json
+import os
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -33,6 +37,17 @@ from core.incident import (
     SEVERITIES,
     default_actor,
 )
+from core.evidence.integrity import signing
+from core.evidence.registry import (
+    RegistryError,
+    TrustedSignerRegistry,
+    load_registry,
+    load_signed_registry,
+    save_registry,
+    seal_registry,
+    verify_registry_seal,
+)
+from core.evidence.seal import load_seal, write_seal
 
 # ---- theme ------------------------------------------------------------------- #
 
@@ -67,8 +82,10 @@ app = typer.Typer(
 )
 evidence_app = typer.Typer(no_args_is_help=True, help="Evidence collection & integrity.")
 timeline_app = typer.Typer(no_args_is_help=True, help="Incident timeline.")
+registry_app = typer.Typer(no_args_is_help=True, help="Trusted signer registry.")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(timeline_app, name="timeline")
+app.add_typer(registry_app, name="registry")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -101,6 +118,65 @@ def _sev(sev: str) -> Text:
 
 def _status(st: str) -> Text:
     return Text(st, style=STATUS_STYLE.get(st, "white"))
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _registry_path(home: Path, registry: Optional[str]) -> Path:
+    return Path(registry).resolve() if registry else home / "trust" / "registry.json"
+
+
+def _registry_seal_path(registry_path: Path, seal: Optional[str]) -> Path:
+    return Path(seal).resolve() if seal else Path(f"{registry_path}.seal.json")
+
+
+def _root_key_path(home: Path, root_key: Optional[str]) -> Path:
+    return Path(root_key).resolve() if root_key else home / "trust" / "root.key"
+
+
+def _root_verify_path(home: Path, root_verify: Optional[str]) -> Path:
+    return Path(root_verify).resolve() if root_verify else home / "trust" / "root.verify.json"
+
+
+def _write_root_key(path: Path, sk) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        base64.b64encode(signing.encode_signing_key(sk)).decode("ascii"),
+        encoding="utf-8",
+    )
+    try:
+        os.chmod(path, 0o600)
+    except OSError:
+        pass
+
+
+def _read_root_key(path: Path):
+    raw = base64.b64decode(path.read_text(encoding="utf-8").strip())
+    return signing.decode_signing_key(raw)
+
+
+def _write_root_verify(path: Path, vk) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps(
+            {
+                "verify_key": signing.encode_verify_key(vk),
+                "fingerprint": signing.key_fingerprint(vk),
+                "algorithm": "ed25519",
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+
+
+def _read_root_verify(path: Path):
+    info = json.loads(path.read_text(encoding="utf-8"))
+    return signing.decode_verify_key(info["verify_key"]), info
 
 
 # ---- declare ----------------------------------------------------------------- #
@@ -173,6 +249,153 @@ def evidence_add(
         t.add_row("note", note)
     console.print(Panel(t, title="[bold]EVIDENCE SEALED[/]", border_style="cyan",
                         box=box.ROUNDED))
+
+
+# ---- registry --------------------------------------------------------------- #
+
+@registry_app.command("init")
+def registry_init(
+    home: Optional[str] = typer.Option(None, "--home"),
+    registry: Optional[str] = typer.Option(None, "--registry", help="Registry JSON path."),
+    seal: Optional[str] = typer.Option(None, "--seal", help="Registry seal JSON path."),
+    root_key: Optional[str] = typer.Option(None, "--root-key", help="Root signing key path."),
+    root_verify: Optional[str] = typer.Option(None, "--root-verify", help="Root verify key JSON path."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    sequence: int = typer.Option(1, "--sequence", help="Initial signed registry sequence."),
+    force: bool = typer.Option(False, "--force", help="Overwrite an existing registry/root key set."),
+):
+    """Create a root-signed trusted signer registry."""
+    h = _home(home)
+    registry_path = _registry_path(h, registry)
+    seal_path = _registry_seal_path(registry_path, seal)
+    root_key_path = _root_key_path(h, root_key)
+    root_verify_path = _root_verify_path(h, root_verify)
+    targets = (registry_path, seal_path, root_key_path, root_verify_path)
+    if not force:
+        existing = [str(p) for p in targets if p.exists()]
+        if existing:
+            console.print(f"[{C_BAD}]✗ refusing to overwrite existing file(s): {', '.join(existing)}[/]")
+            raise typer.Exit(code=1)
+    if sequence < 0:
+        console.print(f"[{C_BAD}]✗ sequence must be non-negative[/]")
+        raise typer.Exit(code=1)
+
+    root_sk, root_vk = signing.generate_signing_keypair()
+    reg = TrustedSignerRegistry()
+    if sequence > 0:
+        reg.bump(sequence)
+
+    registry_path.parent.mkdir(parents=True, exist_ok=True)
+    save_registry(reg, registry_path)
+    write_seal(
+        seal_registry(reg, root_sk, signer=actor or default_actor(), sealed_when=_now()),
+        seal_path,
+    )
+    _write_root_key(root_key_path, root_sk)
+    _write_root_verify(root_verify_path, root_vk)
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("registry", Text(str(registry_path), style=C_ACCENT))
+    table.add_row("seal", str(seal_path))
+    table.add_row("root key", str(root_key_path))
+    table.add_row("root verify", str(root_verify_path))
+    table.add_row("sequence", str(reg.sequence))
+    table.add_row("root fingerprint", signing.key_fingerprint(root_vk))
+    console.print(Panel(table, title="[bold]REGISTRY INITIALIZED[/]",
+                        border_style="green", box=box.ROUNDED))
+
+
+@registry_app.command("trust-active")
+def registry_trust_active(
+    home: Optional[str] = typer.Option(None, "--home"),
+    registry: Optional[str] = typer.Option(None, "--registry", help="Registry JSON path."),
+    seal: Optional[str] = typer.Option(None, "--seal", help="Registry seal JSON path."),
+    root_key: Optional[str] = typer.Option(None, "--root-key", help="Root signing key path."),
+    actor: Optional[str] = typer.Option(None, "--actor", help="Signer identity to store."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Incident signer to trust (default: active)."),
+    sequence: Optional[int] = typer.Option(None, "--sequence", help="Next registry sequence."),
+):
+    """Add the active incident signer to the trusted registry and reseal it."""
+    h = _home(home)
+    registry_path = _registry_path(h, registry)
+    seal_path = _registry_seal_path(registry_path, seal)
+    root_key_path = _root_key_path(h, root_key)
+
+    try:
+        root_sk = _read_root_key(root_key_path)
+        reg = load_signed_registry(registry_path, seal_path, root_sk.verify_key)
+        ws = IncidentWorkspace.load(h, incident_id) if incident_id else IncidentWorkspace.load_current(h)
+        _, signer_info = ws._read_verify_key()
+        next_sequence = sequence if sequence is not None else reg.sequence + 1
+        reg.add_signer(
+            actor or ws.state.get("actor") or default_actor(),
+            signer_info["verify_key"],
+            created_when=_now(),
+        )
+        reg.bump(next_sequence)
+        save_registry(reg, registry_path)
+        write_seal(
+            seal_registry(reg, root_sk, signer=actor or default_actor(), sealed_when=_now()),
+            seal_path,
+        )
+    except (WorkspaceError, RegistryError, OSError, ValueError, KeyError) as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("registry", Text(str(registry_path), style=C_ACCENT))
+    table.add_row("incident", ws.incident_id)
+    table.add_row("trusted signer", actor or ws.state.get("actor") or default_actor())
+    table.add_row("fingerprint", signer_info["fingerprint"])
+    table.add_row("sequence", str(reg.sequence))
+    console.print(Panel(table, title="[bold]SIGNER TRUSTED[/]",
+                        border_style="green", box=box.ROUNDED))
+
+
+@registry_app.command("verify")
+def registry_verify(
+    home: Optional[str] = typer.Option(None, "--home"),
+    registry: Optional[str] = typer.Option(None, "--registry", help="Registry JSON path."),
+    seal: Optional[str] = typer.Option(None, "--seal", help="Registry seal JSON path."),
+    root_verify: Optional[str] = typer.Option(None, "--root-verify", help="Root verify key JSON path."),
+    min_sequence: int = typer.Option(0, "--min-sequence", help="Anti-rollback sequence floor."),
+):
+    """Verify the trusted signer registry's root seal."""
+    h = _home(home)
+    registry_path = _registry_path(h, registry)
+    seal_path = _registry_seal_path(registry_path, seal)
+    root_verify_path = _root_verify_path(h, root_verify)
+    try:
+        reg = load_registry(registry_path)
+        registry_seal = load_seal(seal_path)
+        root_vk, root_info = _read_root_verify(root_verify_path)
+        ok, reason = verify_registry_seal(
+            reg, registry_seal, root_vk, min_sequence=min_sequence
+        )
+    except (RegistryError, OSError, ValueError, KeyError, json.JSONDecodeError) as e:
+        console.print(f"[{C_BAD}]✗ registry verification failed: {e}[/]")
+        raise typer.Exit(code=1)
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("registry", Text(str(registry_path), style=C_ACCENT))
+    table.add_row("sequence", str(reg.sequence))
+    table.add_row("signers", str(len(reg.entries)))
+    table.add_row("root fingerprint", root_info["fingerprint"])
+    table.add_row("reason", reason)
+    if ok:
+        console.print(Panel(table, title="[bold]REGISTRY VERIFIED[/]",
+                            border_style="green", box=box.ROUNDED))
+        console.print(f"[{C_OK}]✓ registry root seal verified[/]")
+        return
+    console.print(Panel(table, title="[bold]REGISTRY VERIFICATION FAILED[/]",
+                        border_style="red", box=box.ROUNDED))
+    raise typer.Exit(code=1)
 
 
 # ---- doctor / use / close ---------------------------------------------------- #

@@ -11,6 +11,7 @@ python -m interfaces.cli.coreline declare --title "DB Exfiltration Alert" --seve
 python -m interfaces.cli.coreline evidence add --file alert.log --note "SIEM alert"
 python -m interfaces.cli.coreline timeline show
 python -m interfaces.cli.coreline status
+python -m interfaces.cli.coreline verify
 python -m interfaces.cli.coreline report
 python -m interfaces.cli.coreline close
 ```
@@ -55,12 +56,26 @@ export CORELINE_ACTOR="$(whoami)"
 .venv/bin/python -m interfaces.cli.coreline doctor
 .venv/bin/python -m interfaces.cli.coreline list
 .venv/bin/python -m interfaces.cli.coreline use INC-YYYYMMDD-ABC123
+.venv/bin/python -m interfaces.cli.coreline verify
 .venv/bin/python -m interfaces.cli.coreline close
 ```
 
 `doctor` checks the local incident store and verifies the active incident's manifest
-signature, custody chain, and audit chain. `close` generates the final PIR, marks the
-incident closed, and locks evidence intake.
+signature, custody chain, audit chain, and stored local evidence artifacts. `verify`
+prints the same integrity checks for one incident or all incidents. `close` generates the
+final PIR, marks the incident closed, and locks evidence intake.
+
+Trusted signer registry workflow:
+
+```bash
+.venv/bin/python -m interfaces.cli.coreline registry init
+.venv/bin/python -m interfaces.cli.coreline registry trust-active
+.venv/bin/python -m interfaces.cli.coreline registry verify --min-sequence 2
+```
+
+By default this writes a demo local root key and signed registry under
+`$CORELINE_HOME/trust/`. The root key is a local development convenience; production root
+key custody should be handled outside the incident workspace.
 
 ## Verification
 
@@ -73,7 +88,7 @@ Baseline test gate:
 Current local baseline at this checkpoint:
 
 ```text
-285 passed, 1 skipped, 17 warnings, 6 subtests passed
+290 passed, 1 skipped, 17 warnings, 6 subtests passed
 ```
 
 Scrub check for old project naming: search the working tree for the previous project name

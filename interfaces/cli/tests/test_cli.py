@@ -17,7 +17,10 @@ def _run(args, home: Path):
 def test_help_lists_all_commands():
     res = runner.invoke(app, ["--help"])
     assert res.exit_code == 0
-    for cmd in ("declare", "doctor", "evidence", "timeline", "status", "report", "use", "close", "verify"):
+    for cmd in (
+        "declare", "doctor", "evidence", "timeline", "status", "report",
+        "use", "close", "verify", "registry",
+    ):
         assert cmd in res.output
 
 
@@ -116,6 +119,46 @@ def test_verify_fails_when_stored_evidence_is_modified(tmp_path: Path):
     r = _run(["doctor"], home)
     assert r.exit_code == 1
     assert "stored evidence artifacts failed verification" in r.output
+
+
+def test_registry_init_trust_active_and_verify(tmp_path: Path):
+    home = tmp_path / "incidents"
+    r = _run(["declare", "--title", "DB Exfiltration Alert", "--severity", "SEV1"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["registry", "init"], home)
+    assert r.exit_code == 0, r.output
+    assert "REGISTRY INITIALIZED" in r.output
+    assert (home / "trust" / "registry.json").exists()
+    assert (home / "trust" / "registry.json.seal.json").exists()
+    assert (home / "trust" / "root.key").exists()
+    assert (home / "trust" / "root.verify.json").exists()
+
+    r = _run(["registry", "verify", "--min-sequence", "1"], home)
+    assert r.exit_code == 0, r.output
+    assert "registry root seal verified" in r.output
+
+    r = _run(["registry", "trust-active"], home)
+    assert r.exit_code == 0, r.output
+    assert "SIGNER TRUSTED" in r.output
+
+    r = _run(["registry", "verify", "--min-sequence", "2"], home)
+    assert r.exit_code == 0, r.output
+    assert "signers" in r.output
+
+
+def test_registry_verify_fails_after_registry_tamper(tmp_path: Path):
+    home = tmp_path / "incidents"
+    r = _run(["registry", "init"], home)
+    assert r.exit_code == 0, r.output
+
+    registry = home / "trust" / "registry.json"
+    data = registry.read_text(encoding="utf-8")
+    registry.write_text(data.replace('"sequence":1', '"sequence":2'), encoding="utf-8")
+
+    r = _run(["registry", "verify"], home)
+    assert r.exit_code == 1
+    assert "REGISTRY VERIFICATION FAILED" in r.output
 
 
 def test_commands_fail_cleanly_with_no_active_incident(tmp_path: Path):
