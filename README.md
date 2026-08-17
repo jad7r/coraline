@@ -9,11 +9,23 @@ The current usable path is the operator CLI:
 ```bash
 python -m interfaces.cli.coreline declare --title "DB Exfiltration Alert" --severity SEV1
 python -m interfaces.cli.coreline evidence add --file alert.log --note "SIEM alert"
+python -m interfaces.cli.coreline observe add \
+  --text "CloudTrail shows database access from unusual source IP" \
+  --evidence <sha256-or-prefix>
+python -m interfaces.cli.coreline observe correct OBS-ABC123DEF456 \
+  --text "Source IP was 10.0.0.6" --reason "Analyst typo"
+python -m interfaces.cli.coreline observe retract OBS-ABC123DEF456 \
+  --reason "Duplicate observation"
+python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
+python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
+python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
+python -m interfaces.cli.coreline lifecycle resolve --note "Customer impact ended"
 python -m interfaces.cli.coreline timeline show
 python -m interfaces.cli.coreline status
 python -m interfaces.cli.coreline verify
 python -m interfaces.cli.coreline report
 python -m interfaces.cli.coreline close
+python -m interfaces.cli.coreline lifecycle seal
 ```
 
 ## Current Shape
@@ -56,14 +68,50 @@ export CORELINE_ACTOR="$(whoami)"
 .venv/bin/python -m interfaces.cli.coreline doctor
 .venv/bin/python -m interfaces.cli.coreline list
 .venv/bin/python -m interfaces.cli.coreline use INC-YYYYMMDD-ABC123
+.venv/bin/python -m interfaces.cli.coreline observe add \
+  --text "CloudTrail shows database access from unusual source IP" \
+  --evidence <sha256-or-prefix>
+.venv/bin/python -m interfaces.cli.coreline observe list
+.venv/bin/python -m interfaces.cli.coreline observe show OBS-ABC123DEF456
+.venv/bin/python -m interfaces.cli.coreline observe correct OBS-ABC123DEF456 \
+  --text "Source IP was 10.0.0.6" --reason "Analyst typo"
+.venv/bin/python -m interfaces.cli.coreline observe retract OBS-ABC123DEF456 \
+  --reason "Duplicate observation"
+.venv/bin/python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
+.venv/bin/python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
+.venv/bin/python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
+.venv/bin/python -m interfaces.cli.coreline lifecycle resolve --note "Customer impact ended"
 .venv/bin/python -m interfaces.cli.coreline verify
 .venv/bin/python -m interfaces.cli.coreline close
+.venv/bin/python -m interfaces.cli.coreline lifecycle seal
 ```
 
 `doctor` checks the local incident store and verifies the active incident's manifest
 signature, custody chain, audit chain, and stored local evidence artifacts. `verify`
 prints the same integrity checks for one incident or all incidents. `close` generates the
-final PIR, marks the incident closed, and locks evidence intake.
+final PIR, marks the incident closed, and locks evidence intake. Closure requires all
+pre-closure quality gates to pass; administrative or false-positive closure requires an
+explicit audited override:
+
+```bash
+.venv/bin/python -m interfaces.cli.coreline close --force --reason "False positive; no artifact available"
+```
+
+The incident lifecycle is forward-only:
+
+```text
+OPEN -> INVESTIGATING -> CONTAINED -> ERADICATING -> RECOVERING -> RESOLVED -> CLOSED -> SEALED
+```
+
+`RESOLVED` locks evidence intake, `CLOSED` locks case mutation after the final PIR, and
+`SEALED` is the final read-only archival state.
+
+Observations are immutable investigative records. They may reference zero or more evidence
+items by SHA-256 hash or unique hash prefix from the incident's authoritative manifest;
+Coreline never copies evidence bytes into an observation and never treats filesystem paths
+as evidence references. Corrections and retractions are append-only amendments: the
+original observation remains intact, and the amendment history is audited and included in
+the PIR.
 
 Trusted signer registry workflow:
 
@@ -88,7 +136,7 @@ Baseline test gate:
 Current local baseline at this checkpoint:
 
 ```text
-290 passed, 1 skipped, 17 warnings, 6 subtests passed
+315 passed, 1 skipped, 17 warnings, 6 subtests passed
 ```
 
 Scrub check for old project naming: search the working tree for the previous project name

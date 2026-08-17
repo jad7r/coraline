@@ -21,7 +21,7 @@ import json
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import typer
 from rich.console import Console
@@ -33,6 +33,9 @@ from rich import box
 
 from core.incident import (
     IncidentWorkspace,
+    OBSERVATION_DISPOSITIONS,
+    Observation,
+    ObservationAmendment,
     WorkspaceError,
     SEVERITIES,
     default_actor,
@@ -67,11 +70,15 @@ SEV_STYLE = {
     "SEV5": "grey58",
 }
 STATUS_STYLE = {
+    "OPEN": "bold yellow",
     "DECLARED": "bold yellow",
     "INVESTIGATING": "bold cyan",
     "CONTAINED": "bold blue",
+    "ERADICATING": "bold magenta",
+    "RECOVERING": "bold white",
     "RESOLVED": "bold green",
     "CLOSED": "grey58",
+    "SEALED": "bold white on grey23",
 }
 
 app = typer.Typer(
@@ -83,9 +90,13 @@ app = typer.Typer(
 evidence_app = typer.Typer(no_args_is_help=True, help="Evidence collection & integrity.")
 timeline_app = typer.Typer(no_args_is_help=True, help="Incident timeline.")
 registry_app = typer.Typer(no_args_is_help=True, help="Trusted signer registry.")
+lifecycle_app = typer.Typer(no_args_is_help=True, help="Incident lifecycle transitions.")
+observe_app = typer.Typer(no_args_is_help=True, help="Investigative observations.")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(timeline_app, name="timeline")
 app.add_typer(registry_app, name="registry")
+app.add_typer(lifecycle_app, name="lifecycle")
+app.add_typer(observe_app, name="observe")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -118,6 +129,38 @@ def _sev(sev: str) -> Text:
 
 def _status(st: str) -> Text:
     return Text(st, style=STATUS_STYLE.get(st, "white"))
+
+
+def _evidence_refs(evidence: tuple[str, ...]) -> str:
+    return ", ".join(sha[:12] + "…" for sha in evidence) if evidence else "none"
+
+
+def _observation_panel(obs: Observation) -> Panel:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("observation", Text(obs.observation_id, style=C_ACCENT))
+    table.add_row("incident", obs.incident_id)
+    table.add_row("created", obs.created_at)
+    table.add_row("creator", obs.creator)
+    table.add_row("disposition", obs.disposition)
+    if obs.subject:
+        table.add_row("subject", obs.subject)
+    table.add_row("evidence", _evidence_refs(obs.evidence))
+    table.add_row("text", obs.text)
+    return Panel(table, title="[bold]OBSERVATION[/]", border_style="cyan",
+                 box=box.ROUNDED)
+
+
+def _amendment_rows(table: Table, amendments: List[ObservationAmendment]) -> None:
+    for amendment in amendments:
+        table.add_row(
+            amendment.amendment_id,
+            amendment.created_at.replace("T", " ")[:19],
+            amendment.amendment_type,
+            amendment.text,
+            amendment.reason or "",
+        )
 
 
 def _now() -> datetime:
@@ -249,6 +292,249 @@ def evidence_add(
         t.add_row("note", note)
     console.print(Panel(t, title="[bold]EVIDENCE SEALED[/]", border_style="cyan",
                         box=box.ROUNDED))
+
+
+# ---- observations ---------------------------------------------------------- #
+
+@observe_app.command("add")
+def observe_add(
+    text: str = typer.Option(..., "--text", "-t", help="Observation text."),
+    evidence: Optional[List[str]] = typer.Option(
+        None,
+        "--evidence",
+        "-e",
+        help="Evidence SHA-256 or unique prefix from this incident manifest.",
+    ),
+    disposition: str = typer.Option(
+        "OBSERVED",
+        "--disposition",
+        "-d",
+        help=f"One of {', '.join(OBSERVATION_DISPOSITIONS)}.",
+    ),
+    subject: Optional[str] = typer.Option(None, "--subject", "-s",
+                                          help="Optional investigated subject."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Record an immutable investigative observation linked to evidence hashes."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        obs = ws.add_observation(
+            text=text,
+            actor=who,
+            evidence_refs=evidence or [],
+            disposition=disposition,
+            subject=subject,
+        )
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(_observation_panel(obs))
+
+
+@observe_app.command("list")
+def observe_list(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """List investigative observations for an incident."""
+    ws = _load(home, incident_id)
+    observations = ws.observations()
+    table = Table(
+        title=f"[bold]OBSERVATIONS[/]  {ws.incident_id}",
+        box=box.SIMPLE_HEAVY,
+        header_style=C_ACCENT,
+        border_style="cyan",
+        pad_edge=False,
+    )
+    table.add_column("id", style=C_ACCENT, no_wrap=True)
+    table.add_column("created", style=C_DIM, no_wrap=True)
+    table.add_column("disposition", no_wrap=True)
+    table.add_column("evidence", style=C_DIM)
+    table.add_column("observation", overflow="fold", ratio=1)
+    for obs in observations:
+        state = "RETRACTED" if ws.observation_is_retracted(obs.observation_id) else obs.disposition
+        table.add_row(
+            obs.observation_id,
+            obs.created_at.replace("T", " ")[:19],
+            state,
+            _evidence_refs(obs.evidence),
+            obs.text,
+        )
+    console.print(table)
+    console.print(f"[{C_DIM}]{len(observations)} observation(s)[/]")
+
+
+@observe_app.command("show")
+def observe_show(
+    observation_id: str = typer.Argument(..., help="Observation ID."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Show one investigative observation."""
+    ws = _load(home, incident_id)
+    try:
+        obs = ws.observation(observation_id)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(_observation_panel(obs))
+    amendments = ws.observation_amendments(observation_id)
+    if amendments:
+        table = Table(
+            title=f"[bold]AMENDMENTS[/]  {observation_id}",
+            box=box.SIMPLE_HEAVY,
+            header_style=C_ACCENT,
+            border_style="cyan",
+            pad_edge=False,
+        )
+        table.add_column("id", style=C_ACCENT, no_wrap=True)
+        table.add_column("created", style=C_DIM, no_wrap=True)
+        table.add_column("type", no_wrap=True)
+        table.add_column("text", overflow="fold", ratio=1)
+        table.add_column("reason", overflow="fold", ratio=1)
+        _amendment_rows(table, amendments)
+        console.print(table)
+
+
+@observe_app.command("correct")
+def observe_correct(
+    observation_id: str = typer.Argument(..., help="Observation ID."),
+    correction: str = typer.Option(..., "--text", "-t", help="Correction text."),
+    reason: Optional[str] = typer.Option(None, "--reason", "-r", help="Optional correction reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a correction to an immutable observation."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.correct_observation(observation_id, correction, who, reason=reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ correction recorded[/] {amendment.amendment_id}")
+
+
+@observe_app.command("retract")
+def observe_retract(
+    observation_id: str = typer.Argument(..., help="Observation ID."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Retraction reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a retraction to an immutable observation."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.retract_observation(observation_id, reason, who)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ retraction recorded[/] {amendment.amendment_id}")
+
+
+# ---- lifecycle -------------------------------------------------------------- #
+
+def _transition(
+    target: str,
+    incident_id: Optional[str],
+    note: str,
+    actor: Optional[str],
+    home: Optional[str],
+) -> None:
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        ws.transition(target, who, note=note)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("incident", Text(ws.incident_id, style=C_ACCENT))
+    table.add_row("status", _status(ws.state["status"]))
+    table.add_row("actor", who)
+    if note:
+        table.add_row("note", note)
+    console.print(Panel(table, title="[bold]LIFECYCLE UPDATED[/]",
+                        border_style=STATUS_STYLE.get(ws.state["status"], "cyan"),
+                        box=box.ROUNDED))
+
+
+@lifecycle_app.command("contain")
+def lifecycle_contain(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    note: str = typer.Option("", "--note", "-n", help="Containment note."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Mark the incident CONTAINED and audit the transition."""
+    _transition("CONTAINED", incident_id, note, actor, home)
+
+
+@lifecycle_app.command("eradicate")
+def lifecycle_eradicate(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    note: str = typer.Option("", "--note", "-n", help="Eradication note."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Mark the incident ERADICATING and audit the transition."""
+    _transition("ERADICATING", incident_id, note, actor, home)
+
+
+@lifecycle_app.command("recover")
+def lifecycle_recover(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    note: str = typer.Option("", "--note", "-n", help="Recovery note."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Mark the incident RECOVERING and audit the transition."""
+    _transition("RECOVERING", incident_id, note, actor, home)
+
+
+@lifecycle_app.command("resolve")
+def lifecycle_resolve(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    note: str = typer.Option("", "--note", "-n", help="Resolution note."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Mark the incident RESOLVED once integrity gates are green."""
+    _transition("RESOLVED", incident_id, note, actor, home)
+
+
+@lifecycle_app.command("seal")
+def lifecycle_seal(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Seal a closed incident after all integrity gates verify green."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        ws.seal_incident(who)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("incident", Text(ws.incident_id, style=C_ACCENT))
+    table.add_row("status", _status(ws.state["status"]))
+    table.add_row("actor", who)
+    console.print(Panel(table, title="[bold]INCIDENT SEALED[/]",
+                        border_style=STATUS_STYLE["SEALED"], box=box.ROUNDED))
 
 
 # ---- registry --------------------------------------------------------------- #
@@ -538,12 +824,14 @@ def close(
     actor: Optional[str] = typer.Option(None, "--actor"),
     home: Optional[str] = typer.Option(None, "--home"),
     raw: bool = typer.Option(False, "--raw", help="Print raw markdown instead of rendered."),
+    force: bool = typer.Option(False, "--force", help="Close even when pre-closure gates fail."),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Required reason when using --force."),
 ):
     """Generate the final PIR and close the incident."""
     ws = _load(home, incident_id)
     who = actor or default_actor()
     try:
-        md = ws.close_incident(who)
+        md = ws.close_incident(who, force=force, reason=reason)
     except WorkspaceError as e:
         console.print(f"[{C_BAD}]✗ {e}[/]")
         raise typer.Exit(code=1)
@@ -663,7 +951,11 @@ def report(
     """Generate and display the Post-Incident Report (PIR)."""
     ws = _load(home, incident_id)
     who = actor or default_actor()
-    md = ws.generate_report(who)
+    try:
+        md = ws.generate_report(who)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
     if raw:
         console.print(md)
     else:

@@ -30,6 +30,7 @@ import base64
 import getpass
 import json
 import os
+import re
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -46,13 +47,28 @@ from core.storage.local import LocalFileBackend
 # ---- constants --------------------------------------------------------------- #
 
 SEVERITIES = ("SEV1", "SEV2", "SEV3", "SEV4", "SEV5")
+OBSERVATION_DISPOSITIONS = ("OBSERVED", "SUSPECTED", "REFUTED", "INCONCLUSIVE")
+OBSERVATION_AMENDMENT_TYPES = ("CORRECTION", "RETRACTION")
+SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+SHA256_PREFIX_RE = re.compile(r"^[0-9a-f]{12,63}$")
 
-# Lifecycle states, in order. `declare` starts at DECLARED; the first evidence advances
-# to INVESTIGATING; `report` (with gates green) advances to RESOLVED.
-LIFECYCLE = ("DECLARED", "INVESTIGATING", "CONTAINED", "RESOLVED", "CLOSED")
+# Lifecycle states, in order. `declare` starts at OPEN; the first evidence advances
+# to INVESTIGATING. Resolution/closure/sealing are explicit audited boundaries.
+LIFECYCLE = (
+    "OPEN",
+    "INVESTIGATING",
+    "CONTAINED",
+    "ERADICATING",
+    "RECOVERING",
+    "RESOLVED",
+    "CLOSED",
+    "SEALED",
+)
 
 DEFAULT_HOME = "coreline-incidents"
 CURRENT_POINTER = "CURRENT"
+
+LEGACY_STATUS = {"DECLARED": "OPEN"}
 
 
 def _now() -> datetime:
@@ -66,6 +82,12 @@ def new_incident_id(when: datetime) -> str:
 
 def default_actor() -> str:
     return os.environ.get("CORELINE_ACTOR") or getpass.getuser()
+
+
+def canonical_status(status: Optional[str]) -> str:
+    """Normalize persisted lifecycle values from older Coreline workspaces."""
+    raw = (status or "OPEN").upper()
+    return LEGACY_STATUS.get(raw, raw)
 
 
 # ---- errors ------------------------------------------------------------------ #
@@ -124,6 +146,97 @@ class Gate:
     detail: str
 
 
+@dataclass(frozen=True)
+class Observation:
+    """One immutable investigative observation linked to incident evidence hashes."""
+
+    observation_id: str
+    incident_id: str
+    text: str
+    created_at: str
+    creator: str
+    disposition: str = "OBSERVED"
+    evidence: Tuple[str, ...] = ()
+    subject: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "observation_id": self.observation_id,
+            "incident_id": self.incident_id,
+            "text": self.text,
+            "created_at": self.created_at,
+            "creator": self.creator,
+            "disposition": self.disposition,
+            "evidence": list(self.evidence),
+        }
+        if self.subject:
+            d["subject"] = self.subject
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Observation":
+        return cls(
+            observation_id=str(d["observation_id"]),
+            incident_id=str(d["incident_id"]),
+            text=str(d["text"]),
+            created_at=str(d["created_at"]),
+            creator=str(d["creator"]),
+            disposition=str(d.get("disposition", "OBSERVED")).upper(),
+            evidence=tuple(str(e).lower() for e in d.get("evidence", [])),
+            subject=str(d["subject"]) if d.get("subject") else None,
+        )
+
+    def text_hash(self) -> str:
+        return sha256_bytes(self.text.encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class ObservationAmendment:
+    """Append-only correction or retraction for an immutable observation."""
+
+    amendment_id: str
+    observation_id: str
+    incident_id: str
+    amendment_type: str
+    created_at: str
+    creator: str
+    text: str
+    reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "amendment_id": self.amendment_id,
+            "observation_id": self.observation_id,
+            "incident_id": self.incident_id,
+            "amendment_type": self.amendment_type,
+            "created_at": self.created_at,
+            "creator": self.creator,
+            "text": self.text,
+        }
+        if self.reason:
+            d["reason"] = self.reason
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ObservationAmendment":
+        return cls(
+            amendment_id=str(d["amendment_id"]),
+            observation_id=str(d["observation_id"]),
+            incident_id=str(d["incident_id"]),
+            amendment_type=str(d["amendment_type"]).upper(),
+            created_at=str(d["created_at"]),
+            creator=str(d["creator"]),
+            text=str(d["text"]),
+            reason=str(d["reason"]) if d.get("reason") else None,
+        )
+
+    def text_hash(self) -> str:
+        return sha256_bytes(self.text.encode("utf-8"))
+
+    def reason_hash(self) -> Optional[str]:
+        return sha256_bytes(self.reason.encode("utf-8")) if self.reason else None
+
+
 # ---- the workspace ----------------------------------------------------------- #
 
 @dataclass
@@ -150,6 +263,10 @@ class IncidentWorkspace:
     @property
     def _manifest_path(self) -> Path:
         return self.dir / "manifest.json"
+
+    @property
+    def _observations_path(self) -> Path:
+        return self.dir / "observations.json"
 
     @property
     def _sig_path(self) -> Path:
@@ -249,7 +366,7 @@ class IncidentWorkspace:
             "incident_id": incident_id,
             "title": title.strip(),
             "severity": severity,
-            "status": "DECLARED",
+            "status": "OPEN",
             "created_at": to_iso(when),
             "updated_at": to_iso(when),
             "actor": actor,
@@ -270,6 +387,7 @@ class IncidentWorkspace:
         if not ws._state_path.exists():
             raise WorkspaceError(f"no such incident: {incident_id} (under {home})")
         ws.state = json.loads(ws._state_path.read_text(encoding="utf-8"))
+        ws.state["status"] = canonical_status(ws.state.get("status"))
         return ws
 
     @classmethod
@@ -300,16 +418,59 @@ class IncidentWorkspace:
 
     # -- state ----------------------------------------------------------------- #
     def _save_state(self) -> None:
+        self.state["status"] = canonical_status(self.state.get("status"))
         self._state_path.write_text(
             json.dumps(self.state, indent=2, sort_keys=True), encoding="utf-8"
         )
 
+    def _status_index(self, status: Optional[str] = None) -> int:
+        cur = canonical_status(status or self.state.get("status"))
+        if cur not in LIFECYCLE:
+            raise WorkspaceError(f"invalid persisted lifecycle status: {cur}")
+        return LIFECYCLE.index(cur)
+
     def _advance_status(self, target: str, when: datetime) -> None:
         """Advance the lifecycle forward only (never regress)."""
-        cur = self.state.get("status", "DECLARED")
-        if LIFECYCLE.index(target) > LIFECYCLE.index(cur):
+        target = canonical_status(target)
+        if target not in LIFECYCLE:
+            raise WorkspaceError(f"invalid lifecycle target: {target}")
+        cur = canonical_status(self.state.get("status"))
+        if self._status_index(target) > self._status_index(cur):
             self.state["status"] = target
             self.state["updated_at"] = to_iso(when)
+
+    def transition(
+        self,
+        target: str,
+        actor: str,
+        note: str = "",
+        when: Optional[datetime] = None,
+    ) -> None:
+        """Advance incident lifecycle with an explicit audit entry."""
+        if self.is_closed:
+            raise WorkspaceError(f"incident {self.incident_id} is closed; lifecycle is locked")
+        target = canonical_status(target)
+        if target not in LIFECYCLE:
+            raise WorkspaceError(f"invalid lifecycle target: {target}")
+        if target in ("OPEN", "CLOSED", "SEALED"):
+            raise WorkspaceError(f"cannot transition incident to {target}")
+        cur = canonical_status(self.state.get("status"))
+        if self._status_index(target) <= self._status_index(cur):
+            raise WorkspaceError(f"cannot move lifecycle from {cur} to {target}")
+        if target == "RESOLVED":
+            blocking = [g for g in self.gates() if g.key != "report" and not g.passed]
+            if blocking:
+                keys = ", ".join(g.key for g in blocking)
+                raise WorkspaceError(f"cannot resolve incident; unmet gates: {keys}")
+        when = when or _now()
+        self._advance_status(target, when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "lifecycle-transition",
+            {"from": cur, "to": target, "note": note},
+            when,
+        )
 
     # -- audit ----------------------------------------------------------------- #
     def _load_audit(self) -> List[AuditEntry]:
@@ -386,26 +547,88 @@ class IncidentWorkspace:
     # -- closure --------------------------------------------------------------- #
     @property
     def is_closed(self) -> bool:
-        return self.state.get("status") == "CLOSED" or bool(self.state.get("closed"))
+        return canonical_status(self.state.get("status")) in ("CLOSED", "SEALED") or bool(
+            self.state.get("closed")
+        )
 
-    def close_incident(self, actor: str, when: Optional[datetime] = None) -> str:
+    @property
+    def is_sealed(self) -> bool:
+        return canonical_status(self.state.get("status")) == "SEALED" or bool(
+            self.state.get("sealed")
+        )
+
+    def _evidence_intake_locked(self) -> bool:
+        return self.is_closed or self._status_index() >= self._status_index("RESOLVED")
+
+    def close_incident(
+        self,
+        actor: str,
+        when: Optional[datetime] = None,
+        *,
+        force: bool = False,
+        reason: Optional[str] = None,
+    ) -> str:
         """Close the incident: generate the final signed PIR and lock the lifecycle.
 
         Generates the PIR (which seals the current manifest state and advances to
         RESOLVED when gates are green), then marks the incident CLOSED. After this the
         CLI/GUI treat evidence intake as locked.
         """
+        if self.is_sealed:
+            raise WorkspaceError(f"incident {self.incident_id} is sealed")
         if self.is_closed:
             raise WorkspaceError(f"incident {self.incident_id} is already closed")
         when = when or _now()
+        blocking = [g for g in self.gates() if g.key != "report" and not g.passed]
+        if blocking and not force:
+            keys = ", ".join(g.key for g in blocking)
+            raise WorkspaceError(
+                f"cannot close incident; unmet pre-closure gates: {keys}"
+            )
+        reason_text = (reason or "").strip()
+        if blocking and not reason_text:
+            raise WorkspaceError("forced closure requires a reason")
+        if blocking:
+            self._append_audit(
+                actor,
+                "closure-override",
+                {"reason": reason_text, "blocking_gates": [g.key for g in blocking]},
+                when,
+            )
         report_md = self.generate_report(actor, when)
         self.state["status"] = "CLOSED"
         self.state["closed"] = True
+        if blocking:
+            self.state["closure_forced"] = True
+            self.state["closure_reason"] = reason_text
         self.state["updated_at"] = to_iso(when)
         self._save_state()
         self._append_audit(actor, "incident-closed",
-                          {"final_status": "CLOSED"}, when)
+                          {"final_status": "CLOSED", "forced": bool(blocking)}, when)
         return report_md
+
+    def seal_incident(self, actor: str, when: Optional[datetime] = None) -> None:
+        """Seal a closed incident after all integrity gates verify green."""
+        if self.is_sealed:
+            raise WorkspaceError(f"incident {self.incident_id} is already sealed")
+        if canonical_status(self.state.get("status")) != "CLOSED":
+            raise WorkspaceError("incident must be closed before it can be sealed")
+        blocking = [g for g in self.gates() if not g.passed]
+        if blocking:
+            keys = ", ".join(g.key for g in blocking)
+            raise WorkspaceError(f"cannot seal incident; unmet gates: {keys}")
+        when = when or _now()
+        cur = canonical_status(self.state.get("status"))
+        self.state["status"] = "SEALED"
+        self.state["sealed"] = True
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "incident-sealed",
+            {"from": cur, "to": "SEALED"},
+            when,
+        )
 
     def evidence_items(self):
         """Evidence items in canonical order (for display)."""
@@ -415,6 +638,335 @@ class IncidentWorkspace:
     def evidence_shas(self) -> set:
         """SHA-256s already in the manifest — used to make uploads idempotent."""
         return {it.sha256 for it in self._load_manifest().items}
+
+    # -- observations ---------------------------------------------------------- #
+    def _load_observation_store(self) -> Tuple[List[Observation], List[ObservationAmendment]]:
+        if not self._observations_path.exists():
+            return [], []
+        data = json.loads(self._observations_path.read_text(encoding="utf-8"))
+        observations = [Observation.from_dict(d) for d in data.get("observations", [])]
+        amendments = [
+            ObservationAmendment.from_dict(d)
+            for d in data.get("amendments", [])
+        ]
+        return (
+            sorted(observations, key=lambda o: (o.created_at, o.observation_id)),
+            sorted(amendments, key=lambda a: (a.created_at, a.amendment_id)),
+        )
+
+    def _load_observations(self) -> List[Observation]:
+        observations, _ = self._load_observation_store()
+        return observations
+
+    def _load_observation_amendments(self) -> List[ObservationAmendment]:
+        _, amendments = self._load_observation_store()
+        return amendments
+
+    def _save_observation_store(
+        self,
+        observations: List[Observation],
+        amendments: List[ObservationAmendment],
+    ) -> None:
+        ordered = sorted(observations, key=lambda o: (o.created_at, o.observation_id))
+        ordered_amendments = sorted(amendments, key=lambda a: (a.created_at, a.amendment_id))
+        payload = {
+            "version": "1",
+            "incident_id": self.incident_id,
+            "observations": [o.to_dict() for o in ordered],
+            "amendments": [a.to_dict() for a in ordered_amendments],
+        }
+        self._observations_path.write_text(
+            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        )
+
+    def _save_observations(self, observations: List[Observation]) -> None:
+        _, amendments = self._load_observation_store()
+        self._save_observation_store(observations, amendments)
+
+    def _save_observation_amendments(self, amendments: List[ObservationAmendment]) -> None:
+        observations, _ = self._load_observation_store()
+        self._save_observation_store(observations, amendments)
+
+    def _resolve_evidence_ref(self, ref: str) -> str:
+        value = ref.strip().lower()
+        if not value:
+            raise WorkspaceError("evidence reference must not be empty")
+        shas = sorted(self.evidence_shas())
+        if SHA256_RE.match(value):
+            if value in shas:
+                return value
+            raise WorkspaceError(f"evidence not found in incident manifest: {ref}")
+        if SHA256_PREFIX_RE.match(value):
+            matches = [sha for sha in shas if sha.startswith(value)]
+            if len(matches) == 1:
+                return matches[0]
+            if matches:
+                raise WorkspaceError(f"ambiguous evidence reference: {ref}")
+        raise WorkspaceError(f"invalid evidence reference: {ref}")
+
+    def observations(self) -> List[Observation]:
+        return self._load_observations()
+
+    def observation_amendments(
+        self,
+        observation_id: Optional[str] = None,
+    ) -> List[ObservationAmendment]:
+        amendments = self._load_observation_amendments()
+        if observation_id:
+            amendments = [a for a in amendments if a.observation_id == observation_id]
+        return amendments
+
+    def observation_is_retracted(self, observation_id: str) -> bool:
+        return any(
+            a.amendment_type == "RETRACTION"
+            for a in self.observation_amendments(observation_id)
+        )
+
+    def observation(self, observation_id: str) -> Observation:
+        for obs in self._load_observations():
+            if obs.observation_id == observation_id:
+                return obs
+        raise WorkspaceError(f"observation not found: {observation_id}")
+
+    def add_observation(
+        self,
+        text: str,
+        actor: str,
+        evidence_refs: Optional[List[str]] = None,
+        disposition: str = "OBSERVED",
+        subject: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> Observation:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "observations are locked"
+            )
+        clean_text = text.strip()
+        if not clean_text:
+            raise WorkspaceError("observation text must not be empty")
+        disposition = disposition.upper()
+        if disposition not in OBSERVATION_DISPOSITIONS:
+            raise WorkspaceError(
+                f"invalid observation disposition {disposition!r}; choose one of "
+                f"{', '.join(OBSERVATION_DISPOSITIONS)}"
+            )
+        evidence = tuple(
+            sorted({self._resolve_evidence_ref(ref) for ref in (evidence_refs or [])})
+        )
+        when = when or _now()
+        observation_id = f"OBS-{uuid.uuid4().hex[:12].upper()}"
+        existing = self._load_observations()
+        if any(o.observation_id == observation_id for o in existing):
+            raise WorkspaceError(f"duplicate observation id generated: {observation_id}")
+        obs = Observation(
+            observation_id=observation_id,
+            incident_id=self.incident_id,
+            text=clean_text,
+            created_at=to_iso(when),
+            creator=actor,
+            disposition=disposition,
+            evidence=evidence,
+            subject=subject.strip() if subject and subject.strip() else None,
+        )
+        self._save_observations(existing + [obs])
+        self.state["observation_count"] = len(existing) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "observation-created",
+            {
+                "observation_id": obs.observation_id,
+                "incident_id": self.incident_id,
+                "disposition": obs.disposition,
+                "evidence": list(obs.evidence),
+                "subject": obs.subject,
+                "text_hash": obs.text_hash(),
+                "text": obs.text,
+            },
+            when,
+        )
+        return obs
+
+    def correct_observation(
+        self,
+        observation_id: str,
+        correction: str,
+        actor: str,
+        reason: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> ObservationAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "observations are locked"
+            )
+        self.observation(observation_id)
+        if self.observation_is_retracted(observation_id):
+            raise WorkspaceError(f"observation {observation_id} is retracted")
+        clean = correction.strip()
+        if not clean:
+            raise WorkspaceError("correction text must not be empty")
+        reason_text = reason.strip() if reason and reason.strip() else None
+        when = when or _now()
+        amendments = self._load_observation_amendments()
+        amendment = ObservationAmendment(
+            amendment_id=f"OAM-{uuid.uuid4().hex[:12].upper()}",
+            observation_id=observation_id,
+            incident_id=self.incident_id,
+            amendment_type="CORRECTION",
+            created_at=to_iso(when),
+            creator=actor,
+            text=clean,
+            reason=reason_text,
+        )
+        if any(a.amendment_id == amendment.amendment_id for a in amendments):
+            raise WorkspaceError(f"duplicate observation amendment id generated: {amendment.amendment_id}")
+        self._save_observation_amendments(amendments + [amendment])
+        self.state["observation_amendment_count"] = len(amendments) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "observation-corrected",
+            {
+                "amendment_id": amendment.amendment_id,
+                "observation_id": observation_id,
+                "incident_id": self.incident_id,
+                "text_hash": amendment.text_hash(),
+                "reason_hash": amendment.reason_hash(),
+                "correction": amendment.text,
+                "reason": amendment.reason,
+            },
+            when,
+        )
+        return amendment
+
+    def retract_observation(
+        self,
+        observation_id: str,
+        reason: str,
+        actor: str,
+        when: Optional[datetime] = None,
+    ) -> ObservationAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "observations are locked"
+            )
+        self.observation(observation_id)
+        if self.observation_is_retracted(observation_id):
+            raise WorkspaceError(f"observation {observation_id} is already retracted")
+        reason_text = reason.strip()
+        if not reason_text:
+            raise WorkspaceError("retraction reason must not be empty")
+        when = when or _now()
+        amendments = self._load_observation_amendments()
+        amendment = ObservationAmendment(
+            amendment_id=f"OAM-{uuid.uuid4().hex[:12].upper()}",
+            observation_id=observation_id,
+            incident_id=self.incident_id,
+            amendment_type="RETRACTION",
+            created_at=to_iso(when),
+            creator=actor,
+            text=reason_text,
+        )
+        if any(a.amendment_id == amendment.amendment_id for a in amendments):
+            raise WorkspaceError(f"duplicate observation amendment id generated: {amendment.amendment_id}")
+        self._save_observation_amendments(amendments + [amendment])
+        self.state["observation_amendment_count"] = len(amendments) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "observation-retracted",
+            {
+                "amendment_id": amendment.amendment_id,
+                "observation_id": observation_id,
+                "incident_id": self.incident_id,
+                "reason_hash": amendment.text_hash(),
+                "reason": amendment.text,
+            },
+            when,
+        )
+        return amendment
+
+    def verify_observations(self) -> Tuple[bool, List[str]]:
+        errors: List[str] = []
+        try:
+            observations, amendments = self._load_observation_store()
+        except Exception as exc:
+            return False, [f"observations unreadable: {exc}"]
+        seen = set()
+        try:
+            evidence_shas = self.evidence_shas()
+        except Exception as exc:
+            return False, [f"evidence manifest unreadable: {exc}"]
+        audits = self._load_audit()
+        for obs in observations:
+            if obs.observation_id in seen:
+                errors.append(f"{obs.observation_id}: duplicate observation id")
+            seen.add(obs.observation_id)
+            if obs.incident_id != self.incident_id:
+                errors.append(f"{obs.observation_id}: incident id mismatch")
+            if not obs.text.strip():
+                errors.append(f"{obs.observation_id}: empty observation text")
+            if obs.disposition not in OBSERVATION_DISPOSITIONS:
+                errors.append(f"{obs.observation_id}: invalid disposition")
+            for evidence in obs.evidence:
+                if evidence not in evidence_shas:
+                    errors.append(f"{obs.observation_id}: missing evidence {evidence}")
+            matching_audit = any(
+                e.action == "observation-created"
+                and e.detail.get("observation_id") == obs.observation_id
+                and e.detail.get("incident_id") == self.incident_id
+                and e.detail.get("text_hash") == obs.text_hash()
+                and sorted(e.detail.get("evidence", [])) == list(obs.evidence)
+                for e in audits
+            )
+            if not matching_audit:
+                errors.append(f"{obs.observation_id}: missing matching audit event")
+        observation_ids = {o.observation_id for o in observations}
+        amendment_ids = set()
+        retracted = set()
+        for amendment in amendments:
+            if amendment.amendment_id in amendment_ids:
+                errors.append(f"{amendment.amendment_id}: duplicate amendment id")
+            amendment_ids.add(amendment.amendment_id)
+            if amendment.incident_id != self.incident_id:
+                errors.append(f"{amendment.amendment_id}: incident id mismatch")
+            if amendment.observation_id not in observation_ids:
+                errors.append(f"{amendment.amendment_id}: missing observation {amendment.observation_id}")
+            if amendment.amendment_type not in OBSERVATION_AMENDMENT_TYPES:
+                errors.append(f"{amendment.amendment_id}: invalid amendment type")
+            if not amendment.text.strip():
+                errors.append(f"{amendment.amendment_id}: empty amendment text")
+            if amendment.amendment_type == "RETRACTION":
+                if amendment.observation_id in retracted:
+                    errors.append(f"{amendment.amendment_id}: duplicate retraction")
+                retracted.add(amendment.observation_id)
+                matching_audit = any(
+                    e.action == "observation-retracted"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("observation_id") == amendment.observation_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.detail.get("reason_hash") == amendment.text_hash()
+                    for e in audits
+                )
+            else:
+                matching_audit = any(
+                    e.action == "observation-corrected"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("observation_id") == amendment.observation_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.detail.get("text_hash") == amendment.text_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in audits
+                )
+            if not matching_audit:
+                errors.append(f"{amendment.amendment_id}: missing matching audit event")
+        return not errors, errors
 
     # -- evidence + manifest --------------------------------------------------- #
     def _load_manifest(self) -> EvidenceManifest:
@@ -444,8 +996,11 @@ class IncidentWorkspace:
         actor: str,
         when: Optional[datetime] = None,
     ) -> Dict[str, Any]:
-        if self.is_closed:
-            raise WorkspaceError(f"incident {self.incident_id} is closed; evidence intake is locked")
+        if self._evidence_intake_locked():
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "evidence intake is locked"
+            )
         when = when or _now()
         src = Path(file_path)
         if not src.exists() or not src.is_file():
@@ -506,6 +1061,8 @@ class IncidentWorkspace:
             "storage_missing": [],
             "storage_bad_hash": [],
             "storage_unverifiable": [],
+            "observations": True,
+            "observation_errors": [],
         }
         manifest = None
         if self._manifest_path.exists() and self._sig_path.exists():
@@ -535,6 +1092,9 @@ class IncidentWorkspace:
         ok, bad_seq = verify_audit(self._load_audit())
         result["audit_chain"] = ok
         result["audit_bad_seq"] = bad_seq
+        observations_ok, observation_errors = self.verify_observations()
+        result["observations"] = observations_ok
+        result["observation_errors"] = observation_errors
         return result
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
@@ -597,20 +1157,33 @@ class IncidentWorkspace:
                  else f"{len(v['storage_missing'])} missing, "
                       f"{len(v['storage_bad_hash'])} bad hash, "
                       f"{len(v['storage_unverifiable'])} unverifiable"),
+            Gate("observations", "Observations reference valid evidence", v["observations"],
+                 "verified" if v["observations"]
+                 else f"{len(v['observation_errors'])} issue(s)"),
             Gate("report", "PIR generated", report_exists,
                  "present" if report_exists else "not yet generated"),
         ]
 
     # -- report (PIR) ---------------------------------------------------------- #
     def generate_report(self, actor: str, when: Optional[datetime] = None) -> str:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "report generation is locked"
+            )
         when = when or _now()
         v = self.verify()
         manifest = self._load_manifest()
         gates = self.gates()
         blocking = [g for g in gates if g.key != "report" and not g.passed]
         # Advance the lifecycle before composing so the report reflects final status.
-        if not blocking:
-            self._advance_status("RESOLVED", when)
+        if not blocking and self._status_index() < self._status_index("RESOLVED"):
+            self.transition(
+                "RESOLVED",
+                actor,
+                note="PIR generated with pre-closure gates green",
+                when=when,
+            )
 
         lines: List[str] = []
         S = self.state
@@ -643,6 +1216,37 @@ class IncidentWorkspace:
         else:
             lines.append("_No evidence recorded._")
         lines.append("")
+        lines.append("## Observations")
+        lines.append("")
+        observations = self.observations()
+        if observations:
+            lines.append("| ID | Disposition | Subject | Evidence | Observation |")
+            lines.append("|----|-------------|---------|----------|-------------|")
+            for obs in observations:
+                evidence = ", ".join(sha[:16] for sha in obs.evidence) or "-"
+                subject = obs.subject or "-"
+                text = obs.text.replace("|", "\\|").replace("\n", " ")
+                lines.append(
+                    f"| {obs.observation_id} | {obs.disposition} | {subject} | "
+                    f"`{evidence}` | {text} |"
+                )
+        else:
+            lines.append("_No observations recorded._")
+        lines.append("")
+        amendments = self.observation_amendments()
+        if amendments:
+            lines.append("### Observation amendments")
+            lines.append("")
+            lines.append("| Amendment | Observation | Type | Text | Reason |")
+            lines.append("|-----------|-------------|------|------|--------|")
+            for amendment in amendments:
+                text = amendment.text.replace("|", "\\|").replace("\n", " ")
+                reason = (amendment.reason or "-").replace("|", "\\|").replace("\n", " ")
+                lines.append(
+                    f"| {amendment.amendment_id} | {amendment.observation_id} | "
+                    f"{amendment.amendment_type} | {text} | {reason} |"
+                )
+            lines.append("")
         lines.append("## Timeline (audit log)")
         lines.append("")
         lines.append("| Seq | Time | Actor | Action | Detail |")

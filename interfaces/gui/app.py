@@ -9,6 +9,7 @@ Run via ``./run_gui.sh`` (which calls ``streamlit run interfaces/gui/app.py``).
 """
 from __future__ import annotations
 
+from html import escape
 import tempfile
 from pathlib import Path
 
@@ -28,10 +29,20 @@ BG = "#0d1117"; PANEL = "#161b22"; INK = "#e6edf3"; DIM = "#8b949e"
 ACCENT = "#22d3ee"; OK = "#3fb950"; BAD = "#f85149"; WARN = "#d29922"
 SEV_COLOR = {"SEV1": "#f85149", "SEV2": "#db6d28", "SEV3": "#d29922",
              "SEV4": "#58a6ff", "SEV5": "#8b949e"}
-STATUS_COLOR = {"DECLARED": WARN, "INVESTIGATING": ACCENT, "CONTAINED": "#58a6ff",
-                "RESOLVED": OK, "CLOSED": DIM}
+STATUS_COLOR = {
+    "OPEN": WARN,
+    "DECLARED": WARN,
+    "INVESTIGATING": ACCENT,
+    "CONTAINED": "#58a6ff",
+    "ERADICATING": "#d2a8ff",
+    "RECOVERING": "#f0f6fc",
+    "RESOLVED": OK,
+    "CLOSED": DIM,
+    "SEALED": DIM,
+}
 ACTION_COLOR = {"incident-declared": "#58a6ff", "evidence-added": OK,
-                "report-generated": "#bc8cff"}
+                "observation-created": "#d2a8ff", "observation-corrected": WARN,
+                "observation-retracted": BAD, "report-generated": "#bc8cff"}
 
 st.set_page_config(page_title="Coreline — Incident Console", page_icon="🛡️",
                    layout="wide", initial_sidebar_state="expanded")
@@ -189,9 +200,9 @@ left, right = st.columns([1.6, 1])
 # ---- left: evidence dropzone + timeline ------------------------------------ #
 with left:
     st.markdown("#### 📥 Evidence dropzone")
-    locked = ws.is_closed
+    locked = ws.is_closed or S.get("status") == "RESOLVED"
     if locked:
-        st.markdown(badge("🔒 EVIDENCE INTAKE LOCKED — INCIDENT CLOSED", DIM),
+        st.markdown(badge("🔒 EVIDENCE INTAKE LOCKED", DIM),
                     unsafe_allow_html=True)
     else:
         st.caption("Drag & drop logs / pcaps — each file is SHA-256 hashed, copied to "
@@ -236,6 +247,55 @@ with left:
                 f'<span class="mono">sha256 {it.sha256}</span></div>',
                 unsafe_allow_html=True)
 
+    st.markdown("#### 🔎 Observations")
+    evidence_options = [it.sha256 for it in items]
+    with st.form("observation", clear_on_submit=True):
+        obs_text = st.text_area("Observation text", height=90,
+                                placeholder="CloudTrail shows database access from unusual source IP",
+                                disabled=ws.is_closed)
+        obs_evidence = st.multiselect("Evidence references", evidence_options,
+                                      format_func=lambda h: h[:16] + "…",
+                                      disabled=ws.is_closed)
+        obs_disposition = st.selectbox(
+            "Disposition",
+            ("OBSERVED", "SUSPECTED", "REFUTED", "INCONCLUSIVE"),
+            disabled=ws.is_closed,
+        )
+        obs_subject = st.text_input("Subject", placeholder="prod-db, user@example.com, host-01",
+                                    disabled=ws.is_closed)
+        if st.form_submit_button("Record observation", use_container_width=True,
+                                 disabled=ws.is_closed):
+            try:
+                ws.add_observation(
+                    text=obs_text,
+                    actor=ACTOR,
+                    evidence_refs=list(obs_evidence),
+                    disposition=obs_disposition,
+                    subject=obs_subject,
+                )
+                st.rerun()
+            except WorkspaceError as e:
+                st.error(str(e))
+
+    for obs in ws.observations():
+        ev = ", ".join(h[:12] for h in obs.evidence) or "no evidence"
+        subject = f" · {escape(obs.subject)}" if obs.subject else ""
+        state = "RETRACTED" if ws.observation_is_retracted(obs.observation_id) else obs.disposition
+        st.markdown(
+            f'<div class="evt" style="border-left-color:#d2a8ff;">'
+            f'<span class="a">{obs.observation_id}</span> '
+            f'<span class="t">· {state}{subject} · evidence {ev}</span><br>'
+            f'{escape(obs.text)}</div>',
+            unsafe_allow_html=True)
+        for amendment in ws.observation_amendments(obs.observation_id):
+            st.markdown(
+                f'<div class="evt" style="border-left-color:{WARN};margin-left:18px;">'
+                f'<span class="a">{amendment.amendment_type}</span> '
+                f'<span class="t">· {amendment.amendment_id} · '
+                f'{amendment.created_at[:19].replace("T"," ")}</span><br>'
+                f'{escape(amendment.text)}</div>',
+                unsafe_allow_html=True)
+
     st.markdown("#### 🕓 Visual timeline")
     ok_audit = v["audit_chain"]
     st.markdown(
@@ -271,23 +331,57 @@ with right:
     st.markdown(badge(f"{n_pass}/{len(gates)} GATES PASSING", tone),
                 unsafe_allow_html=True)
 
+    st.markdown("#### ⏱️ Lifecycle")
+    lifecycle_steps = [
+        ("CONTAINED", "Contain"),
+        ("ERADICATING", "Eradicate"),
+        ("RECOVERING", "Recover"),
+        ("RESOLVED", "Resolve"),
+    ]
+    cols = st.columns(2)
+    for idx, (target, label) in enumerate(lifecycle_steps):
+        with cols[idx % 2]:
+            if st.button(label, use_container_width=True, disabled=ws.is_closed,
+                         key=f"life-{target}"):
+                try:
+                    ws.transition(target, ACTOR, note=f"GUI lifecycle: {label}")
+                    st.rerun()
+                except WorkspaceError as e:
+                    st.error(str(e))
+
     st.markdown("#### 🔒 Closure")
-    if ws.is_closed:
+    if ws.is_sealed:
+        st.markdown(badge("● INCIDENT SEALED", STATUS_COLOR["SEALED"]),
+                    unsafe_allow_html=True)
+        st.caption("Final archive sealed. Incident is read-only.")
+    elif ws.is_closed:
         st.markdown(badge("● INCIDENT CLOSED", STATUS_COLOR["CLOSED"]),
                     unsafe_allow_html=True)
         st.caption("Lifecycle locked; final signed PIR generated. Evidence intake "
                    "is disabled.")
+        if st.button("Seal incident", use_container_width=True, key="seal"):
+            try:
+                ws.seal_incident(ACTOR)
+                st.rerun()
+            except WorkspaceError as e:
+                st.error(str(e))
     else:
         if st.button("🔒 Close incident (seal final PIR + lock intake)",
                      use_container_width=True, key="close"):
-            ws.close_incident(ACTOR)
-            st.rerun()
+            try:
+                ws.close_incident(ACTOR)
+                st.rerun()
+            except WorkspaceError as e:
+                st.error(str(e))
 
     st.markdown("#### 📄 Post-incident report")
     if st.button("Generate PIR ➜", use_container_width=True, type="primary",
                  disabled=ws.is_closed):
-        ws.generate_report(ACTOR)
-        st.rerun()
+        try:
+            ws.generate_report(ACTOR)
+            st.rerun()
+        except WorkspaceError as e:
+            st.error(str(e))
     if ws.report_path.exists():
         md = ws.report_path.read_text(encoding="utf-8")
         with st.expander("View PIR", expanded=False):

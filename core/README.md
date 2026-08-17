@@ -10,7 +10,7 @@ Modules (each owns one platform responsibility):
 | Package | Owns |
 |---|---|
 | `incident/` | local incident workspace, lifecycle metadata, reports, and audit wiring |
-| `state/` | incident state machine (DECLARED→…→CLOSED); authoritative status |
+| `state/` | incident state machine (OPEN→…→SEALED); authoritative status |
 | `evidence/` | evidence records + the integrity subsystem (`evidence/integrity/`) |
 | `audit/` | append-only, tamper-evident audit log (records AI provenance) |
 | `workflow/` | orchestration of a response across steps |

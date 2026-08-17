@@ -1,6 +1,7 @@
 """Smoke tests for the Typer CLI surface via CliRunner (no real terminal needed)."""
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 from typer.testing import CliRunner
@@ -19,7 +20,7 @@ def test_help_lists_all_commands():
     assert res.exit_code == 0
     for cmd in (
         "declare", "doctor", "evidence", "timeline", "status", "report",
-        "use", "close", "verify", "registry",
+        "use", "close", "verify", "registry", "lifecycle", "observe",
     ):
         assert cmd in res.output
 
@@ -119,6 +120,183 @@ def test_verify_fails_when_stored_evidence_is_modified(tmp_path: Path):
     r = _run(["doctor"], home)
     assert r.exit_code == 1
     assert "stored evidence artifacts failed verification" in r.output
+
+
+def test_close_requires_green_preclosure_gates_or_forced_reason(tmp_path: Path):
+    home = tmp_path / "incidents"
+    r = _run(["declare", "--title", "False positive alert", "--severity", "SEV4"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["close"], home)
+    assert r.exit_code == 1
+    assert "unmet pre-closure gates" in r.output
+
+    r = _run(["close", "--force"], home)
+    assert r.exit_code == 1
+    assert "forced closure requires a reason" in r.output
+
+    r = _run(["close", "--force", "--reason", "False positive; no evidence artifact"], home)
+    assert r.exit_code == 0, r.output
+    assert "INCIDENT CLOSED" in r.output
+
+    r = _run(["timeline", "show"], home)
+    assert r.exit_code == 0, r.output
+    assert "closure-override" in r.output
+
+
+def test_observe_add_list_show_and_reject_missing_evidence(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "cloudtrail.json"
+    ev.write_text('{"eventName":"GetSecretValue"}\n', encoding="utf-8")
+
+    r = _run(["declare", "--title", "Credential exposure", "--severity", "SEV2"], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["evidence", "add", "--file", str(ev), "--note", "CloudTrail"], home)
+    assert r.exit_code == 0, r.output
+
+    iid = (home / "CURRENT").read_text(encoding="utf-8").strip()
+    manifest = json.loads((home / iid / "manifest.json").read_text(encoding="utf-8"))
+    sha = manifest["items"][0]["sha256"]
+
+    r = _run([
+        "observe", "add",
+        "--text", "CloudTrail shows secret access after credential exposure",
+        "--evidence", sha[:16],
+        "--disposition", "OBSERVED",
+        "--subject", "prod/app-secret",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "OBSERVATION" in r.output
+    obs_id = next(part for part in r.output.split() if part.startswith("OBS-"))
+
+    r = _run(["observe", "list"], home)
+    assert r.exit_code == 0, r.output
+    assert obs_id in r.output
+    assert "CloudTrail" in r.output
+    assert "exposure" in r.output
+
+    r = _run(["observe", "show", obs_id], home)
+    assert r.exit_code == 0, r.output
+    assert "prod/app-secret" in r.output
+    assert sha[:12] in r.output
+
+    r = _run([
+        "observe", "correct", obs_id,
+        "--text", "CloudTrail shows GetSecretValue after credential exposure",
+        "--reason", "Use exact API name",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "correction recorded" in r.output
+
+    r = _run(["observe", "show", obs_id], home)
+    assert r.exit_code == 0, r.output
+    assert "AMENDMENTS" in r.output
+    assert "CORRECTION" in r.output
+
+    r = _run(["observe", "retract", obs_id, "--reason", "Duplicate observation"], home)
+    assert r.exit_code == 0, r.output
+    assert "retraction recorded" in r.output
+
+    r = _run(["observe", "list"], home)
+    assert r.exit_code == 0, r.output
+    assert "RETRACTED" in r.output
+
+    r = _run(["observe", "correct", obs_id, "--text", "too late"], home)
+    assert r.exit_code == 1
+    assert "retracted" in r.output
+
+    r = _run(["observe", "add", "--text", "bad ref", "--evidence", "f" * 64], home)
+    assert r.exit_code == 1
+    assert "evidence not found" in r.output
+
+    r = _run(["timeline", "show"], home)
+    assert r.exit_code == 0, r.output
+    assert "observation-created" in r.output
+    assert "observation-corrected" in r.output
+    assert "observation-retracted" in r.output
+
+
+def test_lifecycle_contain_and_resolve_flow(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "alert.log"
+    ev.write_text("exfil evidence\n", encoding="utf-8")
+
+    r = _run(["declare", "--title", "DB Exfiltration Alert", "--severity", "SEV1"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["lifecycle", "resolve", "--note", "Too early"], home)
+    assert r.exit_code == 1
+    assert "cannot resolve incident" in r.output
+
+    r = _run(["evidence", "add", "--file", str(ev), "--note", "SIEM alert"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["lifecycle", "contain", "--note", "Blocked egress"], home)
+    assert r.exit_code == 0, r.output
+    assert "LIFECYCLE UPDATED" in r.output
+
+    r = _run(["lifecycle", "eradicate", "--note", "Rotated exposed credential"], home)
+    assert r.exit_code == 0, r.output
+    assert "ERADICATING" in r.output
+
+    r = _run(["lifecycle", "recover", "--note", "Validated database access"], home)
+    assert r.exit_code == 0, r.output
+    assert "RECOVERING" in r.output
+
+    r = _run(["lifecycle", "resolve", "--note", "Customer impact ended"], home)
+    assert r.exit_code == 0, r.output
+    assert "RESOLVED" in r.output
+
+    r = _run(["evidence", "add", "--file", str(ev), "--note", "late"], home)
+    assert r.exit_code == 1
+    assert "evidence intake is locked" in r.output
+
+    r = _run(["timeline", "show"], home)
+    assert r.exit_code == 0, r.output
+    assert "lifecycle-transition" in r.output
+
+
+def test_lifecycle_seal_requires_closed_incident(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "alert.log"
+    ev.write_text("exfil evidence\n", encoding="utf-8")
+
+    r = _run(["declare", "--title", "DB Exfiltration Alert", "--severity", "SEV1"], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["evidence", "add", "--file", str(ev)], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["lifecycle", "seal"], home)
+    assert r.exit_code == 1
+    assert "must be closed" in r.output
+
+    r = _run(["close"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["lifecycle", "seal"], home)
+    assert r.exit_code == 0, r.output
+    assert "INCIDENT SEALED" in r.output
+
+    r = _run(["report"], home)
+    assert r.exit_code == 1
+    assert "report generation is locked" in r.output
+
+
+def test_lifecycle_refuses_regression(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "alert.log"
+    ev.write_text("exfil evidence\n", encoding="utf-8")
+
+    r = _run(["declare", "--title", "DB Exfiltration Alert", "--severity", "SEV1"], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["evidence", "add", "--file", str(ev)], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["lifecycle", "contain"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["lifecycle", "contain"], home)
+    assert r.exit_code == 1
+    assert "cannot move lifecycle" in r.output
 
 
 def test_registry_init_trust_active_and_verify(tmp_path: Path):
