@@ -189,6 +189,9 @@ class Observation:
     def text_hash(self) -> str:
         return sha256_bytes(self.text.encode("utf-8"))
 
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
 
 @dataclass(frozen=True)
 class ObservationAmendment:
@@ -235,6 +238,21 @@ class ObservationAmendment:
 
     def reason_hash(self) -> Optional[str]:
         return sha256_bytes(self.reason.encode("utf-8")) if self.reason else None
+
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class EffectiveObservation:
+    """Deterministic current view of an immutable observation plus amendments."""
+
+    observation: Observation
+    amendments: Tuple[ObservationAmendment, ...]
+    current_status: str
+    current_text: str
+    latest_correction: Optional[ObservationAmendment] = None
+    retraction: Optional[ObservationAmendment] = None
 
 
 # ---- the workspace ----------------------------------------------------------- #
@@ -438,6 +456,55 @@ class IncidentWorkspace:
         if self._status_index(target) > self._status_index(cur):
             self.state["status"] = target
             self.state["updated_at"] = to_iso(when)
+
+    def update_metadata(
+        self,
+        actor: str,
+        *,
+        title: Optional[str] = None,
+        severity: Optional[str] = None,
+        description: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> None:
+        """Update mutable incident metadata with an audit event."""
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "metadata is locked"
+            )
+        updates: Dict[str, Any] = {}
+        if title is not None:
+            clean_title = title.strip()
+            if not clean_title:
+                raise WorkspaceError("title must not be empty")
+            updates["title"] = clean_title
+        if severity is not None:
+            clean_severity = severity.upper()
+            if clean_severity not in SEVERITIES:
+                raise WorkspaceError(
+                    f"invalid severity {clean_severity!r}; choose one of {', '.join(SEVERITIES)}"
+                )
+            updates["severity"] = clean_severity
+        if description is not None:
+            updates["description"] = description.strip()
+        changes = {
+            key: {"from": self.state.get(key), "to": value}
+            for key, value in updates.items()
+            if self.state.get(key) != value
+        }
+        if not changes:
+            return
+        when = when or _now()
+        for key, change in changes.items():
+            self.state[key] = change["to"]
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "incident-metadata-updated",
+            {"changes": changes},
+            when,
+        )
 
     def transition(
         self,
@@ -722,6 +789,29 @@ class IncidentWorkspace:
             for a in self.observation_amendments(observation_id)
         )
 
+    def effective_observation(self, observation_id: str) -> EffectiveObservation:
+        obs = self.observation(observation_id)
+        amendments = tuple(self.observation_amendments(observation_id))
+        latest_correction: Optional[ObservationAmendment] = None
+        retraction: Optional[ObservationAmendment] = None
+        for amendment in amendments:
+            if amendment.amendment_type == "RETRACTION" and retraction is None:
+                retraction = amendment
+            elif amendment.amendment_type == "CORRECTION" and retraction is None:
+                latest_correction = amendment
+        current_status = "RETRACTED" if retraction else obs.disposition
+        current_text = retraction.text if retraction else (
+            latest_correction.text if latest_correction else obs.text
+        )
+        return EffectiveObservation(
+            observation=obs,
+            amendments=amendments,
+            current_status=current_status,
+            current_text=current_text,
+            latest_correction=latest_correction,
+            retraction=retraction,
+        )
+
     def observation(self, observation_id: str) -> Observation:
         for obs in self._load_observations():
             if obs.observation_id == observation_id:
@@ -779,9 +869,12 @@ class IncidentWorkspace:
             {
                 "observation_id": obs.observation_id,
                 "incident_id": self.incident_id,
+                "created_at": obs.created_at,
+                "creator": obs.creator,
                 "disposition": obs.disposition,
                 "evidence": list(obs.evidence),
                 "subject": obs.subject,
+                "record_hash": obs.record_hash(),
                 "text_hash": obs.text_hash(),
                 "text": obs.text,
             },
@@ -834,6 +927,10 @@ class IncidentWorkspace:
                 "amendment_id": amendment.amendment_id,
                 "observation_id": observation_id,
                 "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "creator": amendment.creator,
+                "record_hash": amendment.record_hash(),
                 "text_hash": amendment.text_hash(),
                 "reason_hash": amendment.reason_hash(),
                 "correction": amendment.text,
@@ -885,6 +982,10 @@ class IncidentWorkspace:
                 "amendment_id": amendment.amendment_id,
                 "observation_id": observation_id,
                 "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "creator": amendment.creator,
+                "record_hash": amendment.record_hash(),
                 "reason_hash": amendment.text_hash(),
                 "reason": amendment.text,
             },
@@ -904,6 +1005,18 @@ class IncidentWorkspace:
         except Exception as exc:
             return False, [f"evidence manifest unreadable: {exc}"]
         audits = self._load_audit()
+        observation_events = [
+            e for e in audits
+            if e.action == "observation-created"
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        amendment_events = [
+            e for e in audits
+            if e.action in ("observation-corrected", "observation-retracted")
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        observations_by_id = {o.observation_id: o for o in observations}
+        amendments_by_id = {a.amendment_id: a for a in amendments}
         for obs in observations:
             if obs.observation_id in seen:
                 errors.append(f"{obs.observation_id}: duplicate observation id")
@@ -921,12 +1034,26 @@ class IncidentWorkspace:
                 e.action == "observation-created"
                 and e.detail.get("observation_id") == obs.observation_id
                 and e.detail.get("incident_id") == self.incident_id
+                and e.actor == obs.creator
+                and e.timestamp == obs.created_at
+                and e.detail.get("creator") == obs.creator
+                and e.detail.get("created_at") == obs.created_at
+                and e.detail.get("disposition") == obs.disposition
+                and e.detail.get("subject") == obs.subject
+                and e.detail.get("record_hash") == obs.record_hash()
                 and e.detail.get("text_hash") == obs.text_hash()
                 and sorted(e.detail.get("evidence", [])) == list(obs.evidence)
-                for e in audits
+                for e in observation_events
             )
             if not matching_audit:
                 errors.append(f"{obs.observation_id}: missing matching audit event")
+        for event in observation_events:
+            observation_id = event.detail.get("observation_id")
+            obs = observations_by_id.get(observation_id)
+            if obs is None:
+                errors.append(f"{observation_id}: audit event has no observation record")
+            elif event.detail.get("record_hash") != obs.record_hash():
+                errors.append(f"{observation_id}: audit event hash mismatch")
         observation_ids = {o.observation_id for o in observations}
         amendment_ids = set()
         retracted = set()
@@ -951,21 +1078,42 @@ class IncidentWorkspace:
                     and e.detail.get("amendment_id") == amendment.amendment_id
                     and e.detail.get("observation_id") == amendment.observation_id
                     and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.creator
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("creator") == amendment.creator
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("record_hash") == amendment.record_hash()
                     and e.detail.get("reason_hash") == amendment.text_hash()
-                    for e in audits
+                    for e in amendment_events
                 )
             else:
+                if amendment.observation_id in retracted:
+                    errors.append(f"{amendment.amendment_id}: correction after retraction")
                 matching_audit = any(
                     e.action == "observation-corrected"
                     and e.detail.get("amendment_id") == amendment.amendment_id
                     and e.detail.get("observation_id") == amendment.observation_id
                     and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.creator
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("creator") == amendment.creator
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("record_hash") == amendment.record_hash()
                     and e.detail.get("text_hash") == amendment.text_hash()
                     and e.detail.get("reason_hash") == amendment.reason_hash()
-                    for e in audits
+                    for e in amendment_events
                 )
             if not matching_audit:
                 errors.append(f"{amendment.amendment_id}: missing matching audit event")
+        for event in amendment_events:
+            amendment_id = event.detail.get("amendment_id")
+            amendment = amendments_by_id.get(amendment_id)
+            if amendment is None:
+                errors.append(f"{amendment_id}: audit event has no amendment record")
+            elif event.detail.get("record_hash") != amendment.record_hash():
+                errors.append(f"{amendment_id}: audit event hash mismatch")
         return not errors, errors
 
     # -- evidence + manifest --------------------------------------------------- #
@@ -1220,15 +1368,17 @@ class IncidentWorkspace:
         lines.append("")
         observations = self.observations()
         if observations:
-            lines.append("| ID | Disposition | Subject | Evidence | Observation |")
-            lines.append("|----|-------------|---------|----------|-------------|")
+            lines.append("| ID | Current status | Subject | Evidence | Current text | Original text |")
+            lines.append("|----|----------------|---------|----------|--------------|---------------|")
             for obs in observations:
+                effective = self.effective_observation(obs.observation_id)
                 evidence = ", ".join(sha[:16] for sha in obs.evidence) or "-"
                 subject = obs.subject or "-"
-                text = obs.text.replace("|", "\\|").replace("\n", " ")
+                current_text = effective.current_text.replace("|", "\\|").replace("\n", " ")
+                original_text = obs.text.replace("|", "\\|").replace("\n", " ")
                 lines.append(
-                    f"| {obs.observation_id} | {obs.disposition} | {subject} | "
-                    f"`{evidence}` | {text} |"
+                    f"| {obs.observation_id} | {effective.current_status} | {subject} | "
+                    f"`{evidence}` | {current_text} | {original_text} |"
                 )
         else:
             lines.append("_No observations recorded._")

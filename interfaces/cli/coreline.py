@@ -355,13 +355,13 @@ def observe_list(
     table.add_column("evidence", style=C_DIM)
     table.add_column("observation", overflow="fold", ratio=1)
     for obs in observations:
-        state = "RETRACTED" if ws.observation_is_retracted(obs.observation_id) else obs.disposition
+        effective = ws.effective_observation(obs.observation_id)
         table.add_row(
             obs.observation_id,
             obs.created_at.replace("T", " ")[:19],
-            state,
+            effective.current_status,
             _evidence_refs(obs.evidence),
-            obs.text,
+            effective.current_text,
         )
     console.print(table)
     console.print(f"[{C_DIM}]{len(observations)} observation(s)[/]")

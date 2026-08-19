@@ -136,7 +136,7 @@ Baseline test gate:
 Current local baseline at this checkpoint:
 
 ```text
-315 passed, 1 skipped, 17 warnings, 6 subtests passed
+326 passed, 1 skipped, 17 warnings, 6 subtests passed
 ```
 
 Scrub check for old project naming: search the working tree for the previous project name

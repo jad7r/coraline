@@ -256,7 +256,13 @@ def test_observation_correction_is_append_only_and_audited(home: Path, evidence_
     assert entry.action == "observation-corrected"
     assert entry.actor == "reviewer@example.com"
     assert entry.detail["amendment_id"] == correction.amendment_id
+    assert entry.detail["record_hash"] == correction.record_hash()
     assert entry.detail["text_hash"] == correction.text_hash()
+
+    effective = ws.effective_observation(obs.observation_id)
+    assert effective.current_status == "OBSERVED"
+    assert effective.current_text == "DB access was from 10.0.0.6"
+    assert effective.latest_correction == correction
 
 
 def test_observation_retraction_is_append_only_and_blocks_later_correction(home: Path):
@@ -269,6 +275,10 @@ def test_observation_retraction_is_append_only_and_blocks_later_correction(home:
     assert ws.observation_is_retracted(obs.observation_id) is True
     assert ws.observation(obs.observation_id).text == "Initial observation"
     assert ws.verify()["observations"] is True
+    effective = ws.effective_observation(obs.observation_id)
+    assert effective.current_status == "RETRACTED"
+    assert effective.current_text == "Source log was wrong"
+    assert effective.retraction == retraction
     with pytest.raises(WorkspaceError, match="retracted"):
         ws.correct_observation(obs.observation_id, "new text", actor="a")
     with pytest.raises(WorkspaceError, match="already retracted"):
@@ -302,6 +312,8 @@ def test_report_includes_observation_amendments(home: Path, evidence_file: Path)
     md = ws.generate_report(actor="a")
 
     assert "### Observation amendments" in md
+    assert "RETRACTED" in md
+    assert "Current text" in md
     assert correction.amendment_id in md
     assert retraction.amendment_id in md
     assert "Corrected observation" in md
@@ -321,6 +333,102 @@ def test_verify_observations_detects_amendment_tampering(home: Path):
     assert v["observations"] is False
     assert any(amendment.amendment_id in err for err in v["observation_errors"])
     assert any("missing matching audit event" in err for err in v["observation_errors"])
+
+
+def test_verify_observations_detects_observation_metadata_tampering(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation(
+        "Initial observation",
+        actor="alice@example.com",
+        disposition="SUSPECTED",
+        subject="prod-db",
+    )
+
+    data = json.loads(ws._observations_path.read_text(encoding="utf-8"))
+    data["observations"][0]["creator"] = "mallory@example.com"
+    data["observations"][0]["disposition"] = "OBSERVED"
+    data["observations"][0]["subject"] = "different-host"
+    ws._observations_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["observations"] is False
+    assert any(obs.observation_id in err for err in v["observation_errors"])
+
+
+def test_verify_observations_detects_deleted_observation_record(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Observation to delete", actor="a")
+
+    data = json.loads(ws._observations_path.read_text(encoding="utf-8"))
+    data["observations"] = []
+    ws._observations_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["observations"] is False
+    assert any(f"{obs.observation_id}: audit event has no observation record" in err
+               for err in v["observation_errors"])
+
+
+def test_verify_observations_detects_deleted_amendment_record(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    amendment = ws.correct_observation(obs.observation_id, "Corrected observation", actor="a")
+
+    data = json.loads(ws._observations_path.read_text(encoding="utf-8"))
+    data["amendments"] = []
+    ws._observations_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["observations"] is False
+    assert any(f"{amendment.amendment_id}: audit event has no amendment record" in err
+               for err in v["observation_errors"])
+
+
+def test_verify_observations_detects_removed_observation_audit_event(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+
+    lines = ws._audit_path.read_text(encoding="utf-8").splitlines()
+    ws._audit_path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+
+    v = ws.verify()
+    assert v["observations"] is False
+    assert any(f"{obs.observation_id}: missing matching audit event" in err
+               for err in v["observation_errors"])
+
+
+def test_verify_observations_detects_correction_after_retraction_in_store(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    ws.retract_observation(obs.observation_id, "Retracted", actor="a")
+
+    data = json.loads(ws._observations_path.read_text(encoding="utf-8"))
+    correction = dict(data["amendments"][0])
+    correction["amendment_id"] = "OAM-MANUALCORR1"
+    correction["amendment_type"] = "CORRECTION"
+    correction["created_at"] = "9999-01-01T00:00:00Z"
+    correction["text"] = "Manual correction after retraction"
+    correction["reason"] = "Bad persisted order"
+    data["amendments"].append(correction)
+    ws._observations_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["observations"] is False
+    assert any("correction after retraction" in err for err in v["observation_errors"])
+
+
+def test_effective_observation_uses_latest_correction_before_retraction(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Original", actor="a")
+    first = ws.correct_observation(obs.observation_id, "First correction", actor="a")
+    second = ws.correct_observation(obs.observation_id, "Second correction", actor="a")
+
+    effective = ws.effective_observation(obs.observation_id)
+
+    assert effective.current_text == "Second correction"
+    assert effective.current_status == "OBSERVED"
+    assert effective.latest_correction == second
+    assert first in effective.amendments
 
 
 def test_verify_observations_detects_duplicate_ids_and_tampering(home: Path, evidence_file: Path):

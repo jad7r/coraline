@@ -2,6 +2,7 @@
 
 from .workspace import (
     AuditEntry,
+    EffectiveObservation,
     Gate,
     IncidentWorkspace,
     LIFECYCLE,
@@ -18,6 +19,7 @@ from .workspace import (
 
 __all__ = [
     "AuditEntry",
+    "EffectiveObservation",
     "Gate",
     "IncidentWorkspace",
     "LIFECYCLE",
