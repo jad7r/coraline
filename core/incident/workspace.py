@@ -27,6 +27,9 @@ All timestamps are UTC. Stdlib + core + PyNaCl only.
 from __future__ import annotations
 
 import base64
+from contextlib import contextmanager
+import fcntl
+from functools import wraps
 import getpass
 import json
 import os
@@ -94,6 +97,14 @@ def canonical_status(status: Optional[str]) -> str:
 
 class WorkspaceError(Exception):
     """Operator-facing workspace error (bad state, missing incident, etc.)."""
+
+
+def locked_mutation(fn):
+    @wraps(fn)
+    def wrapper(self, *args, **kwargs):
+        with self._mutation_lock():
+            return fn(self, *args, **kwargs)
+    return wrapper
 
 
 # ---- audit log --------------------------------------------------------------- #
@@ -264,6 +275,7 @@ class IncidentWorkspace:
 
     # in-memory state
     state: Dict[str, Any] = field(default_factory=dict)
+    _lock_depth: int = field(default=0, init=False, repr=False)
 
     # -- paths ----------------------------------------------------------------- #
     @property
@@ -306,6 +318,43 @@ class IncidentWorkspace:
     def report_path(self) -> Path:
         return self.dir / "report.md"
 
+    @property
+    def _lock_path(self) -> Path:
+        return self.dir / ".coreline.lock"
+
+    # -- filesystem safety ----------------------------------------------------- #
+    @contextmanager
+    def _mutation_lock(self):
+        """Serialize incident mutations across processes on POSIX systems."""
+        if self._lock_depth > 0:
+            self._lock_depth += 1
+            try:
+                yield
+            finally:
+                self._lock_depth -= 1
+            return
+
+        self.dir.mkdir(parents=True, exist_ok=True)
+        with self._lock_path.open("a+", encoding="utf-8") as fh:
+            fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
+            self._lock_depth = 1
+            try:
+                yield
+            finally:
+                self._lock_depth = 0
+                fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+
+    def _write_text_atomic(self, path: Path, content: str, *, mode: Optional[int] = None) -> None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(f".{path.name}.{uuid.uuid4().hex}.tmp")
+        tmp.write_text(content, encoding="utf-8")
+        if mode is not None:
+            try:
+                os.chmod(tmp, mode)
+            except OSError:
+                pass
+        os.replace(tmp, path)
+
     # -- home / current-pointer helpers ---------------------------------------- #
     @staticmethod
     def resolve_home(home: Optional[str] = None) -> Path:
@@ -325,8 +374,9 @@ class IncidentWorkspace:
 
     def _set_current(self) -> None:
         self.home.mkdir(parents=True, exist_ok=True)
-        self._pointer_file(self.home).write_text(self.incident_id, encoding="utf-8")
+        self._write_text_atomic(self._pointer_file(self.home), self.incident_id)
 
+    @locked_mutation
     def make_active(self) -> None:
         """Mark this incident as the active one (shared with the CLI's --current)."""
         self._set_current()
@@ -368,7 +418,8 @@ class IncidentWorkspace:
         # Generate the incident signing key (Ed25519) and persist the seed 0600.
         sk, vk = signing.generate_signing_keypair()
         ws._write_key(sk)
-        ws._signer_path.write_text(
+        ws._write_text_atomic(
+            ws._signer_path,
             json.dumps(
                 {
                     "verify_key": signing.encode_verify_key(vk),
@@ -377,7 +428,6 @@ class IncidentWorkspace:
                 },
                 indent=2,
             ),
-            encoding="utf-8",
         )
 
         ws.state = {
@@ -420,11 +470,11 @@ class IncidentWorkspace:
     # -- key handling ---------------------------------------------------------- #
     def _write_key(self, sk: "signing.nacl.signing.SigningKey") -> None:  # type: ignore[name-defined]
         seed = signing.encode_signing_key(sk)  # 32-byte seed
-        self._key_path.write_text(base64.b64encode(seed).decode("ascii"), encoding="utf-8")
-        try:
-            os.chmod(self._key_path, 0o600)
-        except OSError:
-            pass  # best-effort on platforms without POSIX perms
+        self._write_text_atomic(
+            self._key_path,
+            base64.b64encode(seed).decode("ascii"),
+            mode=0o600,
+        )
 
     def _read_signing_key(self):
         raw = base64.b64decode(self._key_path.read_text(encoding="utf-8").strip())
@@ -436,10 +486,12 @@ class IncidentWorkspace:
 
     # -- state ----------------------------------------------------------------- #
     def _save_state(self) -> None:
-        self.state["status"] = canonical_status(self.state.get("status"))
-        self._state_path.write_text(
-            json.dumps(self.state, indent=2, sort_keys=True), encoding="utf-8"
-        )
+        with self._mutation_lock():
+            self.state["status"] = canonical_status(self.state.get("status"))
+            self._write_text_atomic(
+                self._state_path,
+                json.dumps(self.state, indent=2, sort_keys=True),
+            )
 
     def _status_index(self, status: Optional[str] = None) -> int:
         cur = canonical_status(status or self.state.get("status"))
@@ -457,6 +509,7 @@ class IncidentWorkspace:
             self.state["status"] = target
             self.state["updated_at"] = to_iso(when)
 
+    @locked_mutation
     def update_metadata(
         self,
         actor: str,
@@ -506,6 +559,7 @@ class IncidentWorkspace:
             when,
         )
 
+    @locked_mutation
     def transition(
         self,
         target: str,
@@ -558,19 +612,22 @@ class IncidentWorkspace:
 
     def _append_audit(self, actor: str, action: str, detail: Dict[str, Any],
                       when: datetime) -> AuditEntry:
-        entries = self._load_audit()
-        prev = entries[-1].entry_hash() if entries else None
-        entry = AuditEntry(
-            seq=len(entries) + 1,
-            timestamp=to_iso(when),
-            actor=actor,
-            action=action,
-            detail=detail,
-            prev_hash=prev,
-        )
-        with self._audit_path.open("a", encoding="utf-8") as fh:
-            fh.write(json.dumps(entry.to_dict(), sort_keys=True) + "\n")
-        return entry
+        with self._mutation_lock():
+            entries = self._load_audit()
+            prev = entries[-1].entry_hash() if entries else None
+            entry = AuditEntry(
+                seq=len(entries) + 1,
+                timestamp=to_iso(when),
+                actor=actor,
+                action=action,
+                detail=detail,
+                prev_hash=prev,
+            )
+            with self._audit_path.open("a", encoding="utf-8") as fh:
+                fh.write(json.dumps(entry.to_dict(), sort_keys=True) + "\n")
+                fh.flush()
+                os.fsync(fh.fileno())
+            return entry
 
     def audit_entries(self) -> List[AuditEntry]:
         return self._load_audit()
@@ -627,6 +684,7 @@ class IncidentWorkspace:
     def _evidence_intake_locked(self) -> bool:
         return self.is_closed or self._status_index() >= self._status_index("RESOLVED")
 
+    @locked_mutation
     def close_incident(
         self,
         actor: str,
@@ -674,6 +732,7 @@ class IncidentWorkspace:
                           {"final_status": "CLOSED", "forced": bool(blocking)}, when)
         return report_md
 
+    @locked_mutation
     def seal_incident(self, actor: str, when: Optional[datetime] = None) -> None:
         """Seal a closed incident after all integrity gates verify green."""
         if self.is_sealed:
@@ -742,8 +801,9 @@ class IncidentWorkspace:
             "observations": [o.to_dict() for o in ordered],
             "amendments": [a.to_dict() for a in ordered_amendments],
         }
-        self._observations_path.write_text(
-            json.dumps(payload, indent=2, sort_keys=True), encoding="utf-8"
+        self._write_text_atomic(
+            self._observations_path,
+            json.dumps(payload, indent=2, sort_keys=True),
         )
 
     def _save_observations(self, observations: List[Observation]) -> None:
@@ -818,6 +878,7 @@ class IncidentWorkspace:
                 return obs
         raise WorkspaceError(f"observation not found: {observation_id}")
 
+    @locked_mutation
     def add_observation(
         self,
         text: str,
@@ -882,6 +943,7 @@ class IncidentWorkspace:
         )
         return obs
 
+    @locked_mutation
     def correct_observation(
         self,
         observation_id: str,
@@ -940,6 +1002,7 @@ class IncidentWorkspace:
         )
         return amendment
 
+    @locked_mutation
     def retract_observation(
         self,
         observation_id: str,
@@ -1128,15 +1191,16 @@ class IncidentWorkspace:
         """Persist the current manifest canonically and (re)sign its bytes. Returns hash."""
         manifest = self._current_manifest_for_signing
         canonical = manifest.to_json(pretty=False)
-        self._manifest_path.write_text(canonical, encoding="utf-8")
+        self._write_text_atomic(self._manifest_path, canonical)
         sk = self._read_signing_key()
         sig = signing.sign(canonical.encode("utf-8"), sk)
-        self._sig_path.write_text(base64.b64encode(sig).decode("ascii"), encoding="utf-8")
+        self._write_text_atomic(self._sig_path, base64.b64encode(sig).decode("ascii"))
         return manifest.manifest_hash()
 
     # set transiently by add_evidence / declare before calling _reseal_manifest
     _current_manifest_for_signing: EvidenceManifest = field(default=None, repr=False)  # type: ignore[assignment]
 
+    @locked_mutation
     def add_evidence(
         self,
         file_path: str,
@@ -1313,6 +1377,7 @@ class IncidentWorkspace:
         ]
 
     # -- report (PIR) ---------------------------------------------------------- #
+    @locked_mutation
     def generate_report(self, actor: str, when: Optional[datetime] = None) -> str:
         if self.is_closed:
             raise WorkspaceError(
@@ -1418,7 +1483,7 @@ class IncidentWorkspace:
             lines.append("")
 
         report_md = "\n".join(lines)
-        self.report_path.write_text(report_md, encoding="utf-8")
+        self._write_text_atomic(self.report_path, report_md)
 
         self.state["updated_at"] = to_iso(when)
         self._save_state()

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import multiprocessing
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -30,6 +31,15 @@ def _declare(home: Path) -> IncidentWorkspace:
     return IncidentWorkspace.declare(
         home, title="DB Exfiltration Alert", severity="SEV1", actor="alice@example.com"
     )
+
+
+def _add_observation_process(home: str, incident_id: str, text: str, queue) -> None:
+    try:
+        ws = IncidentWorkspace.load(Path(home), incident_id)
+        obs = ws.add_observation(text, actor="worker")
+        queue.put(("ok", obs.observation_id))
+    except Exception as exc:  # pragma: no cover - surfaced through parent process
+        queue.put(("err", repr(exc)))
 
 
 # ---- declare ----------------------------------------------------------------- #
@@ -429,6 +439,53 @@ def test_effective_observation_uses_latest_correction_before_retraction(home: Pa
     assert effective.current_status == "OBSERVED"
     assert effective.latest_correction == second
     assert first in effective.amendments
+
+
+def test_concurrent_observation_writes_are_serialized(home: Path):
+    ws = _declare(home)
+    ctx = multiprocessing.get_context("fork")
+    queue = ctx.Queue()
+    processes = [
+        ctx.Process(
+            target=_add_observation_process,
+            args=(str(home), ws.incident_id, f"Concurrent observation {idx}", queue),
+        )
+        for idx in range(6)
+    ]
+
+    for process in processes:
+        process.start()
+    for process in processes:
+        process.join(timeout=10)
+
+    results = [queue.get(timeout=2) for _ in processes]
+    assert all(kind == "ok" for kind, _ in results), results
+    assert all(process.exitcode == 0 for process in processes)
+
+    reloaded = IncidentWorkspace.load(home, ws.incident_id)
+    entries = reloaded.audit_entries()
+    assert verify_audit(entries) == (True, None)
+    observation_events = [e for e in entries if e.action == "observation-created"]
+    assert len(observation_events) == 6
+    assert [e.seq for e in entries] == list(range(1, len(entries) + 1))
+    assert len(reloaded.observations()) == 6
+    assert reloaded.verify()["observations"] is True
+
+
+def test_partial_observation_write_without_audit_is_detected(home: Path, monkeypatch):
+    ws = _declare(home)
+
+    def fail_audit(*args, **kwargs):
+        raise RuntimeError("audit write failed")
+
+    monkeypatch.setattr(ws, "_append_audit", fail_audit)
+    with pytest.raises(RuntimeError, match="audit write failed"):
+        ws.add_observation("Observation without audit", actor="a")
+
+    reloaded = IncidentWorkspace.load(home, ws.incident_id)
+    v = reloaded.verify()
+    assert v["observations"] is False
+    assert any("missing matching audit event" in err for err in v["observation_errors"])
 
 
 def test_verify_observations_detects_duplicate_ids_and_tampering(home: Path, evidence_file: Path):
