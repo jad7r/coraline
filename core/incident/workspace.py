@@ -54,6 +54,8 @@ OBSERVATION_DISPOSITIONS = ("OBSERVED", "SUSPECTED", "REFUTED", "INCONCLUSIVE")
 OBSERVATION_AMENDMENT_TYPES = ("CORRECTION", "RETRACTION")
 CLAIM_STATUSES = ("ASSERTED", "SUPPORTED", "REFUTED", "INCONCLUSIVE")
 CLAIM_AMENDMENT_TYPES = ("CORRECTION", "STATUS", "WITHDRAWAL")
+ACTION_STATUSES = ("PLANNED", "INITIATED", "COMPLETED", "FAILED", "CANCELLED")
+ACTION_AMENDMENT_TYPES = ("CORRECTION", "STATUS", "OUTCOME", "CANCELLATION")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA256_PREFIX_RE = re.compile(r"^[0-9a-f]{12,63}$")
 
@@ -382,6 +384,145 @@ class EffectiveClaim:
     withdrawal: Optional[ClaimAmendment] = None
 
 
+@dataclass(frozen=True)
+class Action:
+    """One immutable responder action linked to investigation records."""
+
+    action_id: str
+    incident_id: str
+    action_type: str
+    description: str
+    actor: str
+    created_at: str
+    status: str = "PLANNED"
+    subject: Optional[str] = None
+    observations: Tuple[str, ...] = ()
+    claims: Tuple[str, ...] = ()
+    evidence: Tuple[str, ...] = ()
+    outcome: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "action_id": self.action_id,
+            "incident_id": self.incident_id,
+            "action_type": self.action_type,
+            "description": self.description,
+            "actor": self.actor,
+            "created_at": self.created_at,
+            "status": self.status,
+            "observations": list(self.observations),
+            "claims": list(self.claims),
+            "evidence": list(self.evidence),
+        }
+        if self.subject:
+            d["subject"] = self.subject
+        if self.outcome:
+            d["outcome"] = self.outcome
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Action":
+        return cls(
+            action_id=str(d["action_id"]),
+            incident_id=str(d["incident_id"]),
+            action_type=str(d["action_type"]),
+            description=str(d["description"]),
+            actor=str(d["actor"]),
+            created_at=str(d["created_at"]),
+            status=str(d.get("status", "PLANNED")).upper(),
+            subject=str(d["subject"]) if d.get("subject") else None,
+            observations=tuple(str(o) for o in d.get("observations", [])),
+            claims=tuple(str(c) for c in d.get("claims", [])),
+            evidence=tuple(str(e).lower() for e in d.get("evidence", [])),
+            outcome=str(d["outcome"]) if d.get("outcome") else None,
+        )
+
+    def description_hash(self) -> str:
+        return sha256_bytes(self.description.encode("utf-8"))
+
+    def outcome_hash(self) -> Optional[str]:
+        return sha256_bytes(self.outcome.encode("utf-8")) if self.outcome else None
+
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class ActionAmendment:
+    """Append-only correction, status change, outcome update, or cancellation."""
+
+    amendment_id: str
+    action_id: str
+    incident_id: str
+    amendment_type: str
+    created_at: str
+    actor: str
+    text: str
+    status: Optional[str] = None
+    outcome: Optional[str] = None
+    reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "amendment_id": self.amendment_id,
+            "action_id": self.action_id,
+            "incident_id": self.incident_id,
+            "amendment_type": self.amendment_type,
+            "created_at": self.created_at,
+            "actor": self.actor,
+            "text": self.text,
+        }
+        if self.status:
+            d["status"] = self.status
+        if self.outcome:
+            d["outcome"] = self.outcome
+        if self.reason:
+            d["reason"] = self.reason
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ActionAmendment":
+        return cls(
+            amendment_id=str(d["amendment_id"]),
+            action_id=str(d["action_id"]),
+            incident_id=str(d["incident_id"]),
+            amendment_type=str(d["amendment_type"]).upper(),
+            created_at=str(d["created_at"]),
+            actor=str(d["actor"]),
+            text=str(d["text"]),
+            status=str(d["status"]).upper() if d.get("status") else None,
+            outcome=str(d["outcome"]) if d.get("outcome") else None,
+            reason=str(d["reason"]) if d.get("reason") else None,
+        )
+
+    def text_hash(self) -> str:
+        return sha256_bytes(self.text.encode("utf-8"))
+
+    def outcome_hash(self) -> Optional[str]:
+        return sha256_bytes(self.outcome.encode("utf-8")) if self.outcome else None
+
+    def reason_hash(self) -> Optional[str]:
+        return sha256_bytes(self.reason.encode("utf-8")) if self.reason else None
+
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class EffectiveAction:
+    """Deterministic current view of an immutable action plus amendments."""
+
+    action: Action
+    amendments: Tuple[ActionAmendment, ...]
+    current_status: str
+    current_description: str
+    current_outcome: Optional[str] = None
+    latest_correction: Optional[ActionAmendment] = None
+    latest_status: Optional[ActionAmendment] = None
+    latest_outcome: Optional[ActionAmendment] = None
+    cancellation: Optional[ActionAmendment] = None
+
+
 # ---- the workspace ----------------------------------------------------------- #
 
 @dataclass
@@ -417,6 +558,10 @@ class IncidentWorkspace:
     @property
     def _claims_path(self) -> Path:
         return self.dir / "claims.json"
+
+    @property
+    def _actions_path(self) -> Path:
+        return self.dir / "actions.json"
 
     @property
     def _sig_path(self) -> Path:
@@ -1803,6 +1948,654 @@ class IncidentWorkspace:
                 errors.append(f"{amendment_id}: audit event hash mismatch")
         return not errors, errors
 
+    # -- actions -------------------------------------------------------------- #
+    def _load_action_store(self) -> Tuple[List[Action], List[ActionAmendment]]:
+        if not self._actions_path.exists():
+            return [], []
+        data = json.loads(self._actions_path.read_text(encoding="utf-8"))
+        actions = [Action.from_dict(d) for d in data.get("actions", [])]
+        amendments = [
+            ActionAmendment.from_dict(d)
+            for d in data.get("amendments", [])
+        ]
+        return (
+            sorted(actions, key=lambda a: (a.created_at, a.action_id)),
+            sorted(amendments, key=lambda a: (a.created_at, a.amendment_id)),
+        )
+
+    def _load_actions(self) -> List[Action]:
+        actions, _ = self._load_action_store()
+        return actions
+
+    def _load_action_amendments(self) -> List[ActionAmendment]:
+        _, amendments = self._load_action_store()
+        return amendments
+
+    def _save_action_store(
+        self,
+        actions: List[Action],
+        amendments: List[ActionAmendment],
+    ) -> None:
+        ordered = sorted(actions, key=lambda a: (a.created_at, a.action_id))
+        ordered_amendments = sorted(amendments, key=lambda a: (a.created_at, a.amendment_id))
+        payload = {
+            "version": "1",
+            "incident_id": self.incident_id,
+            "actions": [a.to_dict() for a in ordered],
+            "amendments": [a.to_dict() for a in ordered_amendments],
+        }
+        self._write_text_atomic(
+            self._actions_path,
+            json.dumps(payload, indent=2, sort_keys=True),
+        )
+
+    def _save_actions(self, actions: List[Action]) -> None:
+        _, amendments = self._load_action_store()
+        self._save_action_store(actions, amendments)
+
+    def _save_action_amendments(self, amendments: List[ActionAmendment]) -> None:
+        actions, _ = self._load_action_store()
+        self._save_action_store(actions, amendments)
+
+    def actions(self) -> List[Action]:
+        return self._load_actions()
+
+    def list_actions(self) -> List[Action]:
+        return self.actions()
+
+    def action_amendments(self, action_id: Optional[str] = None) -> List[ActionAmendment]:
+        amendments = self._load_action_amendments()
+        if action_id:
+            amendments = [a for a in amendments if a.action_id == action_id]
+        return amendments
+
+    def action(self, action_id: str) -> Action:
+        for action in self._load_actions():
+            if action.action_id == action_id:
+                return action
+        raise WorkspaceError(f"action not found: {action_id}")
+
+    def get_action(self, action_id: str) -> Action:
+        return self.action(action_id)
+
+    def action_is_cancelled(self, action_id: str) -> bool:
+        action = self.action(action_id)
+        return action.status == "CANCELLED" or any(
+            a.amendment_type == "CANCELLATION"
+            for a in self.action_amendments(action_id)
+        )
+
+    def effective_action(self, action_id: str) -> EffectiveAction:
+        action = self.action(action_id)
+        amendments = tuple(self.action_amendments(action_id))
+        latest_correction: Optional[ActionAmendment] = None
+        latest_status: Optional[ActionAmendment] = None
+        latest_outcome: Optional[ActionAmendment] = None
+        cancellation: Optional[ActionAmendment] = None
+        for amendment in amendments:
+            if amendment.amendment_type == "CANCELLATION" and cancellation is None:
+                cancellation = amendment
+            elif amendment.amendment_type == "CORRECTION" and cancellation is None:
+                latest_correction = amendment
+            elif amendment.amendment_type == "STATUS" and cancellation is None:
+                latest_status = amendment
+            elif amendment.amendment_type == "OUTCOME" and cancellation is None:
+                latest_outcome = amendment
+        current_status = "CANCELLED" if cancellation else (
+            latest_status.status if latest_status and latest_status.status else action.status
+        )
+        current_description = (
+            latest_correction.text if latest_correction else action.description
+        )
+        current_outcome = (
+            latest_outcome.outcome if latest_outcome and latest_outcome.outcome else action.outcome
+        )
+        return EffectiveAction(
+            action=action,
+            amendments=amendments,
+            current_status=current_status,
+            current_description=current_description,
+            current_outcome=current_outcome,
+            latest_correction=latest_correction,
+            latest_status=latest_status,
+            latest_outcome=latest_outcome,
+            cancellation=cancellation,
+        )
+
+    def _resolve_action_observation_refs(self, refs: Optional[List[str]]) -> Tuple[str, ...]:
+        return tuple(sorted({self._resolve_observation_ref(ref) for ref in (refs or [])}))
+
+    def _resolve_action_claim_refs(self, refs: Optional[List[str]]) -> Tuple[str, ...]:
+        resolved = []
+        for ref in refs or []:
+            value = ref.strip()
+            if not value:
+                raise WorkspaceError("claim reference must not be empty")
+            if "/" in value or "\\" in value:
+                raise WorkspaceError(f"invalid claim reference: {ref}")
+            self.claim(value)
+            resolved.append(value)
+        return tuple(sorted(set(resolved)))
+
+    def _resolve_action_evidence_refs(self, refs: Optional[List[str]]) -> Tuple[str, ...]:
+        return tuple(sorted({self._resolve_evidence_ref(ref) for ref in (refs or [])}))
+
+    @locked_mutation
+    def create_action(
+        self,
+        action_type: str,
+        description: str,
+        actor: str,
+        status: str = "PLANNED",
+        subject: Optional[str] = None,
+        observation_refs: Optional[List[str]] = None,
+        claim_refs: Optional[List[str]] = None,
+        evidence_refs: Optional[List[str]] = None,
+        outcome: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> Action:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "actions are locked"
+            )
+        clean_type = action_type.strip()
+        if not clean_type:
+            raise WorkspaceError("action type must not be empty")
+        clean_description = description.strip()
+        if not clean_description:
+            raise WorkspaceError("action description must not be empty")
+        status = status.upper()
+        if status not in ACTION_STATUSES:
+            raise WorkspaceError(
+                f"invalid action status {status!r}; choose one of {', '.join(ACTION_STATUSES)}"
+            )
+        observations = self._resolve_action_observation_refs(observation_refs)
+        claims = self._resolve_action_claim_refs(claim_refs)
+        evidence = self._resolve_action_evidence_refs(evidence_refs)
+        when = when or _now()
+        action_id = f"ACT-{uuid.uuid4().hex[:12].upper()}"
+        existing = self._load_actions()
+        if any(a.action_id == action_id for a in existing):
+            raise WorkspaceError(f"duplicate action id generated: {action_id}")
+        action = Action(
+            action_id=action_id,
+            incident_id=self.incident_id,
+            action_type=clean_type,
+            description=clean_description,
+            actor=actor,
+            created_at=to_iso(when),
+            status=status,
+            subject=subject.strip() if subject and subject.strip() else None,
+            observations=observations,
+            claims=claims,
+            evidence=evidence,
+            outcome=outcome.strip() if outcome and outcome.strip() else None,
+        )
+        self._save_actions(existing + [action])
+        self.state["action_count"] = len(existing) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "action-created",
+            {
+                "action_id": action.action_id,
+                "incident_id": self.incident_id,
+                "created_at": action.created_at,
+                "actor": action.actor,
+                "action_type": action.action_type,
+                "status": action.status,
+                "subject": action.subject,
+                "observations": list(action.observations),
+                "claims": list(action.claims),
+                "evidence": list(action.evidence),
+                "outcome_hash": action.outcome_hash(),
+                "record_hash": action.record_hash(),
+                "description_hash": action.description_hash(),
+                "description": action.description,
+                "outcome": action.outcome,
+            },
+            when,
+        )
+        return action
+
+    def _new_action_amendment(
+        self,
+        action_id: str,
+        amendment_type: str,
+        text: str,
+        actor: str,
+        when: datetime,
+        status: Optional[str] = None,
+        outcome: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> ActionAmendment:
+        amendment = ActionAmendment(
+            amendment_id=f"AAM-{uuid.uuid4().hex[:12].upper()}",
+            action_id=action_id,
+            incident_id=self.incident_id,
+            amendment_type=amendment_type,
+            created_at=to_iso(when),
+            actor=actor,
+            text=text,
+            status=status,
+            outcome=outcome,
+            reason=reason,
+        )
+        amendments = self._load_action_amendments()
+        if any(a.amendment_id == amendment.amendment_id for a in amendments):
+            raise WorkspaceError(f"duplicate action amendment id generated: {amendment.amendment_id}")
+        self._save_action_amendments(amendments + [amendment])
+        self.state["action_amendment_count"] = len(amendments) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        return amendment
+
+    @locked_mutation
+    def amend_action(
+        self,
+        action_id: str,
+        correction: str,
+        actor: str,
+        reason: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> ActionAmendment:
+        return self.correct_action(action_id, correction, actor, reason=reason, when=when)
+
+    @locked_mutation
+    def correct_action(
+        self,
+        action_id: str,
+        correction: str,
+        actor: str,
+        reason: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> ActionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "actions are locked"
+            )
+        self.action(action_id)
+        if self.action_is_cancelled(action_id):
+            raise WorkspaceError(f"action {action_id} is cancelled")
+        clean = correction.strip()
+        if not clean:
+            raise WorkspaceError("action correction text must not be empty")
+        reason_text = reason.strip() if reason and reason.strip() else None
+        when = when or _now()
+        amendment = self._new_action_amendment(
+            action_id,
+            "CORRECTION",
+            clean,
+            actor,
+            when,
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "action-corrected",
+            {
+                "amendment_id": amendment.amendment_id,
+                "action_id": action_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "record_hash": amendment.record_hash(),
+                "text_hash": amendment.text_hash(),
+                "reason_hash": amendment.reason_hash(),
+                "correction": amendment.text,
+                "reason": amendment.reason,
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def update_action_status(
+        self,
+        action_id: str,
+        status: str,
+        actor: str,
+        reason: str,
+        when: Optional[datetime] = None,
+    ) -> ActionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "actions are locked"
+            )
+        self.action(action_id)
+        if self.action_is_cancelled(action_id):
+            raise WorkspaceError(f"action {action_id} is cancelled")
+        status = status.upper()
+        if status not in ACTION_STATUSES:
+            raise WorkspaceError(
+                f"invalid action status {status!r}; choose one of {', '.join(ACTION_STATUSES)}"
+            )
+        if status == "CANCELLED":
+            raise WorkspaceError("use cancel_action to cancel an action")
+        reason_text = reason.strip()
+        if not reason_text:
+            raise WorkspaceError("action status reason must not be empty")
+        when = when or _now()
+        amendment = self._new_action_amendment(
+            action_id,
+            "STATUS",
+            reason_text,
+            actor,
+            when,
+            status=status,
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "action-status-updated",
+            {
+                "amendment_id": amendment.amendment_id,
+                "action_id": action_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "status": amendment.status,
+                "record_hash": amendment.record_hash(),
+                "reason_hash": amendment.reason_hash(),
+                "reason": amendment.reason,
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def update_action_outcome(
+        self,
+        action_id: str,
+        outcome: str,
+        actor: str,
+        reason: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> ActionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "actions are locked"
+            )
+        self.action(action_id)
+        if self.action_is_cancelled(action_id):
+            raise WorkspaceError(f"action {action_id} is cancelled")
+        clean_outcome = outcome.strip()
+        if not clean_outcome:
+            raise WorkspaceError("action outcome must not be empty")
+        reason_text = reason.strip() if reason and reason.strip() else None
+        when = when or _now()
+        amendment = self._new_action_amendment(
+            action_id,
+            "OUTCOME",
+            clean_outcome,
+            actor,
+            when,
+            outcome=clean_outcome,
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "action-outcome-updated",
+            {
+                "amendment_id": amendment.amendment_id,
+                "action_id": action_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "record_hash": amendment.record_hash(),
+                "outcome_hash": amendment.outcome_hash(),
+                "reason_hash": amendment.reason_hash(),
+                "outcome": amendment.outcome,
+                "reason": amendment.reason,
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def cancel_action(
+        self,
+        action_id: str,
+        reason: str,
+        actor: str,
+        when: Optional[datetime] = None,
+    ) -> ActionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "actions are locked"
+            )
+        self.action(action_id)
+        if self.action_is_cancelled(action_id):
+            raise WorkspaceError(f"action {action_id} is already cancelled")
+        reason_text = reason.strip()
+        if not reason_text:
+            raise WorkspaceError("action cancellation reason must not be empty")
+        when = when or _now()
+        amendment = self._new_action_amendment(
+            action_id,
+            "CANCELLATION",
+            reason_text,
+            actor,
+            when,
+            status="CANCELLED",
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "action-cancelled",
+            {
+                "amendment_id": amendment.amendment_id,
+                "action_id": action_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "status": amendment.status,
+                "record_hash": amendment.record_hash(),
+                "reason_hash": amendment.reason_hash(),
+                "reason": amendment.reason,
+            },
+            when,
+        )
+        return amendment
+
+    def verify_actions(self) -> Tuple[bool, List[str]]:
+        errors: List[str] = []
+        try:
+            actions, amendments = self._load_action_store()
+        except Exception as exc:
+            return False, [f"actions unreadable: {exc}"]
+        audits = self._load_audit()
+        action_events = [
+            e for e in audits
+            if e.action == "action-created"
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        amendment_events = [
+            e for e in audits
+            if e.action in (
+                "action-corrected",
+                "action-status-updated",
+                "action-outcome-updated",
+                "action-cancelled",
+            )
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        action_by_id = {action.action_id: action for action in actions}
+        amendments_by_id = {amendment.amendment_id: amendment for amendment in amendments}
+        try:
+            observation_ids = {obs.observation_id for obs in self._load_observations()}
+            claim_ids = {claim.claim_id for claim in self._load_claims()}
+            evidence_shas = self.evidence_shas()
+        except Exception as exc:
+            return False, [f"references unreadable for action verification: {exc}"]
+        seen = set()
+        for action in actions:
+            if action.action_id in seen:
+                errors.append(f"{action.action_id}: duplicate action id")
+            seen.add(action.action_id)
+            if action.incident_id != self.incident_id:
+                errors.append(f"{action.action_id}: incident id mismatch")
+            if not action.action_type.strip():
+                errors.append(f"{action.action_id}: empty action type")
+            if not action.description.strip():
+                errors.append(f"{action.action_id}: empty action description")
+            if action.status not in ACTION_STATUSES:
+                errors.append(f"{action.action_id}: invalid action status")
+            for observation_id in action.observations:
+                if observation_id not in observation_ids:
+                    errors.append(f"{action.action_id}: missing observation {observation_id}")
+            for claim_id in action.claims:
+                if claim_id not in claim_ids:
+                    errors.append(f"{action.action_id}: missing claim {claim_id}")
+            for evidence in action.evidence:
+                if evidence not in evidence_shas:
+                    errors.append(f"{action.action_id}: missing evidence {evidence}")
+            matching_audit = any(
+                e.action == "action-created"
+                and e.detail.get("action_id") == action.action_id
+                and e.detail.get("incident_id") == self.incident_id
+                and e.actor == action.actor
+                and e.timestamp == action.created_at
+                and e.detail.get("actor") == action.actor
+                and e.detail.get("created_at") == action.created_at
+                and e.detail.get("action_type") == action.action_type
+                and e.detail.get("status") == action.status
+                and e.detail.get("subject") == action.subject
+                and e.detail.get("record_hash") == action.record_hash()
+                and e.detail.get("description_hash") == action.description_hash()
+                and e.detail.get("outcome_hash") == action.outcome_hash()
+                and sorted(e.detail.get("observations", [])) == list(action.observations)
+                and sorted(e.detail.get("claims", [])) == list(action.claims)
+                and sorted(e.detail.get("evidence", [])) == list(action.evidence)
+                for e in action_events
+            )
+            if not matching_audit:
+                errors.append(f"{action.action_id}: missing matching audit event")
+        for event in action_events:
+            action_id = event.detail.get("action_id")
+            action = action_by_id.get(action_id)
+            if action is None:
+                errors.append(f"{action_id}: audit event has no action record")
+            elif event.detail.get("record_hash") != action.record_hash():
+                errors.append(f"{action_id}: audit event hash mismatch")
+
+        action_ids = {action.action_id for action in actions}
+        cancelled = {action.action_id for action in actions if action.status == "CANCELLED"}
+        amendment_ids = set()
+        for amendment in amendments:
+            if amendment.amendment_id in amendment_ids:
+                errors.append(f"{amendment.amendment_id}: duplicate action amendment id")
+            amendment_ids.add(amendment.amendment_id)
+            if amendment.incident_id != self.incident_id:
+                errors.append(f"{amendment.amendment_id}: incident id mismatch")
+            if amendment.action_id not in action_ids:
+                errors.append(f"{amendment.amendment_id}: missing action {amendment.action_id}")
+            if amendment.amendment_type not in ACTION_AMENDMENT_TYPES:
+                errors.append(f"{amendment.amendment_id}: invalid amendment type")
+            if not amendment.text.strip():
+                errors.append(f"{amendment.amendment_id}: empty amendment text")
+            if amendment.amendment_type == "STATUS":
+                if amendment.status not in ACTION_STATUSES or amendment.status == "CANCELLED":
+                    errors.append(f"{amendment.amendment_id}: invalid action status")
+                if not amendment.reason:
+                    errors.append(f"{amendment.amendment_id}: status reason missing")
+                if amendment.action_id in cancelled:
+                    errors.append(f"{amendment.amendment_id}: status after cancellation")
+                matching_audit = any(
+                    e.action == "action-status-updated"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("action_id") == amendment.action_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.actor
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("actor") == amendment.actor
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("status") == amendment.status
+                    and e.detail.get("record_hash") == amendment.record_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            elif amendment.amendment_type == "OUTCOME":
+                if not amendment.outcome:
+                    errors.append(f"{amendment.amendment_id}: outcome missing")
+                if amendment.action_id in cancelled:
+                    errors.append(f"{amendment.amendment_id}: outcome after cancellation")
+                matching_audit = any(
+                    e.action == "action-outcome-updated"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("action_id") == amendment.action_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.actor
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("actor") == amendment.actor
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("record_hash") == amendment.record_hash()
+                    and e.detail.get("outcome_hash") == amendment.outcome_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            elif amendment.amendment_type == "CANCELLATION":
+                if amendment.action_id in cancelled:
+                    errors.append(f"{amendment.amendment_id}: duplicate cancellation")
+                cancelled.add(amendment.action_id)
+                matching_audit = any(
+                    e.action == "action-cancelled"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("action_id") == amendment.action_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.actor
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("actor") == amendment.actor
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("status") == amendment.status
+                    and e.detail.get("record_hash") == amendment.record_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            else:
+                if amendment.status is not None or amendment.outcome is not None:
+                    errors.append(f"{amendment.amendment_id}: correction status/outcome must be empty")
+                if amendment.action_id in cancelled:
+                    errors.append(f"{amendment.amendment_id}: correction after cancellation")
+                matching_audit = any(
+                    e.action == "action-corrected"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("action_id") == amendment.action_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.actor
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("actor") == amendment.actor
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("record_hash") == amendment.record_hash()
+                    and e.detail.get("text_hash") == amendment.text_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            if not matching_audit:
+                errors.append(f"{amendment.amendment_id}: missing matching audit event")
+        for event in amendment_events:
+            amendment_id = event.detail.get("amendment_id")
+            amendment = amendments_by_id.get(amendment_id)
+            if amendment is None:
+                errors.append(f"{amendment_id}: audit event has no action amendment record")
+            elif event.detail.get("record_hash") != amendment.record_hash():
+                errors.append(f"{amendment_id}: audit event hash mismatch")
+        return not errors, errors
+
     # -- evidence + manifest --------------------------------------------------- #
     def _load_manifest(self) -> EvidenceManifest:
         if self._manifest_path.exists():
@@ -1901,6 +2694,8 @@ class IncidentWorkspace:
             "observation_errors": [],
             "claims": True,
             "claim_errors": [],
+            "actions": True,
+            "action_errors": [],
         }
         manifest = None
         if self._manifest_path.exists() and self._sig_path.exists():
@@ -1936,6 +2731,9 @@ class IncidentWorkspace:
         claims_ok, claim_errors = self.verify_claims()
         result["claims"] = claims_ok
         result["claim_errors"] = claim_errors
+        actions_ok, action_errors = self.verify_actions()
+        result["actions"] = actions_ok
+        result["action_errors"] = action_errors
         return result
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
@@ -2004,6 +2802,9 @@ class IncidentWorkspace:
             Gate("claims", "Claims reference valid observations", v["claims"],
                  "verified" if v["claims"]
                  else f"{len(v['claim_errors'])} issue(s)"),
+            Gate("actions", "Actions reference valid investigation records", v["actions"],
+                 "verified" if v["actions"]
+                 else f"{len(v['action_errors'])} issue(s)"),
             Gate("report", "PIR generated", report_exists,
                  "present" if report_exists else "not yet generated"),
         ]
@@ -2126,6 +2927,51 @@ class IncidentWorkspace:
                 lines.append(
                     f"| {amendment.amendment_id} | {amendment.claim_id} | "
                     f"{amendment.amendment_type} | {status} | {text} | {reason} |"
+                )
+            lines.append("")
+        lines.append("## Actions")
+        lines.append("")
+        actions = self.actions()
+        if actions:
+            lines.append(
+                "| ID | Type | Current status | Subject | Claims | Observations | Evidence | "
+                "Current action | Original action | Current outcome |"
+            )
+            lines.append(
+                "|----|------|----------------|---------|--------|--------------|----------|"
+                "----------------|-----------------|-----------------|"
+            )
+            for action in actions:
+                effective = self.effective_action(action.action_id)
+                subject = action.subject or "-"
+                claims = ", ".join(action.claims) or "-"
+                observations = ", ".join(action.observations) or "-"
+                evidence = ", ".join(sha[:16] for sha in action.evidence) or "-"
+                current_description = effective.current_description.replace("|", "\\|").replace("\n", " ")
+                original_description = action.description.replace("|", "\\|").replace("\n", " ")
+                outcome = (effective.current_outcome or "-").replace("|", "\\|").replace("\n", " ")
+                lines.append(
+                    f"| {action.action_id} | {action.action_type} | {effective.current_status} | "
+                    f"{subject} | {claims} | {observations} | `{evidence}` | "
+                    f"{current_description} | {original_description} | {outcome} |"
+                )
+        else:
+            lines.append("_No actions recorded._")
+        lines.append("")
+        action_amendments = self.action_amendments()
+        if action_amendments:
+            lines.append("### Action amendments")
+            lines.append("")
+            lines.append("| Amendment | Action | Type | Status | Text | Outcome | Reason |")
+            lines.append("|-----------|--------|------|--------|------|---------|--------|")
+            for amendment in action_amendments:
+                status = amendment.status or "-"
+                text = amendment.text.replace("|", "\\|").replace("\n", " ")
+                outcome = (amendment.outcome or "-").replace("|", "\\|").replace("\n", " ")
+                reason = (amendment.reason or "-").replace("|", "\\|").replace("\n", " ")
+                lines.append(
+                    f"| {amendment.amendment_id} | {amendment.action_id} | "
+                    f"{amendment.amendment_type} | {status} | {text} | {outcome} | {reason} |"
                 )
             lines.append("")
         lines.append("## Timeline (audit log)")

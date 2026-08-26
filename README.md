@@ -26,6 +26,16 @@ python -m interfaces.cli.coreline claim status CLM-ABC123DEF456 \
   --status REFUTED --reason "Follow-up review disproved access"
 python -m interfaces.cli.coreline claim withdraw CLM-ABC123DEF456 \
   --reason "Superseded by final analysis"
+python -m interfaces.cli.coreline action create \
+  --type credential-revocation \
+  --description "Revoked exposed deployment credential" \
+  --claim CLM-ABC123DEF456 --status COMPLETED
+python -m interfaces.cli.coreline action status ACT-ABC123DEF456 \
+  --status COMPLETED --reason "IAM confirmed revocation"
+python -m interfaces.cli.coreline action outcome ACT-ABC123DEF456 \
+  --outcome "Credential revoked and sessions invalidated"
+python -m interfaces.cli.coreline action cancel ACT-ABC123DEF456 \
+  --reason "Superseded by containment playbook"
 python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -99,6 +109,20 @@ export CORELINE_ACTOR="$(whoami)"
   --status REFUTED --reason "Follow-up review disproved access"
 .venv/bin/python -m interfaces.cli.coreline claim withdraw CLM-ABC123DEF456 \
   --reason "Superseded by final analysis"
+.venv/bin/python -m interfaces.cli.coreline action create \
+  --type credential-revocation \
+  --description "Revoked exposed deployment credential" \
+  --claim CLM-ABC123DEF456 --status COMPLETED
+.venv/bin/python -m interfaces.cli.coreline action list
+.venv/bin/python -m interfaces.cli.coreline action show ACT-ABC123DEF456
+.venv/bin/python -m interfaces.cli.coreline action amend ACT-ABC123DEF456 \
+  --description "Revoked exposed deployment credential in production IAM"
+.venv/bin/python -m interfaces.cli.coreline action status ACT-ABC123DEF456 \
+  --status COMPLETED --reason "IAM confirmed revocation"
+.venv/bin/python -m interfaces.cli.coreline action outcome ACT-ABC123DEF456 \
+  --outcome "Credential revoked and sessions invalidated"
+.venv/bin/python -m interfaces.cli.coreline action cancel ACT-ABC123DEF456 \
+  --reason "Superseded by containment playbook"
 .venv/bin/python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 .venv/bin/python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 .venv/bin/python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -142,6 +166,11 @@ and withdrawals are append-only amendments. Claim creation and amendments are au
 verification fails if a claim or amendment is missing, tampered, or points at a missing
 observation.
 
+Actions are immutable responder activity records. An action may reference claims,
+observations, and evidence hashes from the same incident. Corrections, status changes,
+outcome updates, and cancellations are append-only amendments. Action creation and
+amendments are audited, verified, and included in the PIR.
+
 Trusted signer registry workflow:
 
 ```bash
@@ -165,7 +194,7 @@ Baseline test gate:
 Current local baseline at this checkpoint:
 
 ```text
-346 passed, 1 skipped, 17 warnings, 6 subtests passed
+357 passed, 1 skipped, 17 warnings, 6 subtests passed
 ```
 
 Scrub check for old project naming: search the working tree for the previous project name

@@ -42,7 +42,7 @@ def test_incident_loading_and_navigation(tmp_path: Path):
     blob = _md(at)
     assert "DB Exfiltration Alert" in blob
     assert "Integrity verified" in blob
-    assert at.radio[1].options == ["Overview", "Evidence", "Observations", "Claims", "Timeline", "Reports"]
+    assert at.radio[1].options == ["Overview", "Evidence", "Observations", "Claims", "Actions", "Timeline", "Reports"]
 
     _nav(at, "Evidence")
     assert "Evidence" in _md(at)
@@ -50,6 +50,8 @@ def test_incident_loading_and_navigation(tmp_path: Path):
     assert "Observations" in _md(at)
     _nav(at, "Claims")
     assert "Claims" in _md(at)
+    _nav(at, "Actions")
+    assert "Actions" in _md(at)
     _nav(at, "Timeline")
     assert "AUDIT CHAIN VERIFIED" in _md(at)
 
@@ -195,6 +197,56 @@ def test_claim_amendment_workflow(tmp_path: Path):
 
     reloaded = type(ws).load(ws.home, ws.incident_id)
     assert reloaded.effective_claim(claim.claim_id).current_status == "WITHDRAWN"
+
+
+def test_action_create_and_amendment_workflow(tmp_path: Path):
+    ws = _seed(tmp_path)
+    obs = ws.add_observation("EDR shows malware execution", actor="alice@example.com")
+    claim = ws.add_claim("Host was compromised", actor="alice@example.com",
+                         observation_refs=[obs.observation_id])
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    _nav(at, "Actions")
+
+    at.text_input[0].set_value("host-isolation")
+    at.text_area[0].set_value("Isolated compromised host")
+    at.selectbox[0].set_value("INITIATED")
+    at.text_input[1].set_value("host-01")
+    at.multiselect[0].set_value([claim.claim_id])
+    at.multiselect[1].set_value([obs.observation_id])
+    at.text_area[1].set_value("Isolation command sent")
+    record = next(b for b in at.button if "Record action" in (b.label or ""))
+    record.click().run()
+    assert not at.exception
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    action = reloaded.actions()[0]
+    assert action.claims == (claim.claim_id,)
+    assert action.observations == (obs.observation_id,)
+    assert action.status == "INITIATED"
+
+    at.text_area[2].set_value("Isolated host-01 from production network")
+    at.text_input[2].set_value("Add hostname")
+    correct = next(b for b in at.button if "Save action correction" in (b.label or ""))
+    correct.click().run()
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    assert reloaded.effective_action(action.action_id).current_description.endswith("production network")
+
+    at.selectbox[1].set_value("COMPLETED")
+    at.text_area[3].set_value("EDR confirmed isolation")
+    status = next(b for b in at.button if (b.label or "") == "Save action status")
+    status.click().run()
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    assert reloaded.effective_action(action.action_id).current_status == "COMPLETED"
+
+    at.text_area[5].set_value("Superseded by containment playbook")
+    cancel = next(b for b in at.button if "Cancel action" in (b.label or ""))
+    cancel.click().run()
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    assert reloaded.effective_action(action.action_id).current_status == "CANCELLED"
 
 
 def test_lifecycle_controls(tmp_path: Path):

@@ -805,6 +805,226 @@ def test_verify_claims_detects_status_after_withdrawal_in_store(home: Path):
     assert any("status after withdrawal" in err for err in v["claim_errors"])
 
 
+# ---- actions ---------------------------------------------------------------- #
+
+def test_create_action_references_records_and_audits(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    res = ws.add_evidence(str(evidence_file), note="n", actor="a")
+    obs = ws.add_observation("Credential used from unusual IP", actor="a", evidence_refs=[res["sha256"]])
+    claim = ws.add_claim("Credential was compromised", actor="a", observation_refs=[obs.observation_id])
+
+    action = ws.create_action(
+        action_type="credential-revocation",
+        description="Revoked exposed deployment credential",
+        actor="responder@example.com",
+        status="COMPLETED",
+        subject="deploy-key",
+        observation_refs=[obs.observation_id],
+        claim_refs=[claim.claim_id],
+        evidence_refs=[res["sha256"][:16]],
+        outcome="Credential revoked in IAM",
+    )
+
+    assert action.action_id.startswith("ACT-")
+    assert action.incident_id == ws.incident_id
+    assert action.observations == (obs.observation_id,)
+    assert action.claims == (claim.claim_id,)
+    assert action.evidence == (res["sha256"],)
+    assert ws.state["action_count"] == 1
+    v = ws.verify()
+    assert v["actions"] is True
+    entry = ws.audit_entries()[-1]
+    assert entry.action == "action-created"
+    assert entry.actor == "responder@example.com"
+    assert entry.detail["action_id"] == action.action_id
+    assert entry.detail["record_hash"] == action.record_hash()
+    assert entry.detail["description_hash"] == action.description_hash()
+
+
+def test_action_rejects_invalid_references_and_malformed_input(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    ws.add_evidence(str(evidence_file), note="n", actor="a")
+
+    with pytest.raises(WorkspaceError, match="action type"):
+        ws.create_action("   ", "Do thing", actor="a")
+    with pytest.raises(WorkspaceError, match="action description"):
+        ws.create_action("containment", "   ", actor="a")
+    with pytest.raises(WorkspaceError, match="invalid action status"):
+        ws.create_action("containment", "Do thing", actor="a", status="STARTED")
+    with pytest.raises(WorkspaceError, match="observation not found"):
+        ws.create_action("containment", "Do thing", actor="a", observation_refs=["OBS-NOPE"])
+    with pytest.raises(WorkspaceError, match="claim not found"):
+        ws.create_action("containment", "Do thing", actor="a", claim_refs=["CLM-NOPE"])
+    with pytest.raises(WorkspaceError, match="invalid claim reference"):
+        ws.create_action("containment", "Do thing", actor="a", claim_refs=["/tmp/CLM-NOPE"])
+    with pytest.raises(WorkspaceError, match="evidence not found"):
+        ws.create_action("containment", "Do thing", actor="a", evidence_refs=["0" * 64])
+
+
+def test_action_amendments_are_append_only_and_audited(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Initial claim", actor="a", observation_refs=[obs.observation_id])
+    action = ws.create_action(
+        "host-isolation",
+        "Isolate host from network",
+        actor="a",
+        claim_refs=[claim.claim_id],
+    )
+
+    correction = ws.amend_action(action.action_id, "Isolate host-01 from network", actor="a",
+                                 reason="Add hostname")
+    status = ws.update_action_status(action.action_id, "INITIATED", actor="a",
+                                     reason="EDR command sent")
+    outcome = ws.update_action_outcome(action.action_id, "Host isolation confirmed", actor="a",
+                                       reason="EDR state verified")
+    cancellation = ws.cancel_action(action.action_id, "Action superseded", actor="a")
+
+    assert ws.action(action.action_id).description == "Isolate host from network"
+    effective = ws.effective_action(action.action_id)
+    assert effective.current_status == "CANCELLED"
+    assert effective.current_description == "Isolate host-01 from network"
+    assert effective.current_outcome == "Host isolation confirmed"
+    assert effective.latest_correction == correction
+    assert effective.latest_status == status
+    assert effective.latest_outcome == outcome
+    assert effective.cancellation == cancellation
+    assert ws.verify()["actions"] is True
+    actions = [entry.action for entry in ws.audit_entries()]
+    assert "action-corrected" in actions
+    assert "action-status-updated" in actions
+    assert "action-outcome-updated" in actions
+    assert "action-cancelled" in actions
+
+    with pytest.raises(WorkspaceError, match="cancelled"):
+        ws.amend_action(action.action_id, "too late", actor="a")
+    with pytest.raises(WorkspaceError, match="cancelled"):
+        ws.update_action_status(action.action_id, "COMPLETED", actor="a", reason="too late")
+    with pytest.raises(WorkspaceError, match="cancelled"):
+        ws.update_action_outcome(action.action_id, "too late", actor="a")
+    with pytest.raises(WorkspaceError, match="already cancelled"):
+        ws.cancel_action(action.action_id, "again", actor="a")
+
+
+def test_action_amendments_reject_bad_input_and_closed_incident(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    ws.add_evidence(str(evidence_file), note="n", actor="a")
+    action = ws.create_action("containment", "Block source IP", actor="a")
+
+    with pytest.raises(WorkspaceError, match="correction text"):
+        ws.amend_action(action.action_id, "   ", actor="a")
+    with pytest.raises(WorkspaceError, match="status reason"):
+        ws.update_action_status(action.action_id, "INITIATED", actor="a", reason="   ")
+    with pytest.raises(WorkspaceError, match="invalid action status"):
+        ws.update_action_status(action.action_id, "STARTED", actor="a", reason="review")
+    with pytest.raises(WorkspaceError, match="use cancel_action"):
+        ws.update_action_status(action.action_id, "CANCELLED", actor="a", reason="review")
+    with pytest.raises(WorkspaceError, match="outcome must not be empty"):
+        ws.update_action_outcome(action.action_id, "   ", actor="a")
+    with pytest.raises(WorkspaceError, match="cancellation reason"):
+        ws.cancel_action(action.action_id, "   ", actor="a")
+    with pytest.raises(WorkspaceError, match="action not found"):
+        ws.amend_action("ACT-NOPE", "x", actor="a")
+
+    ws.close_incident(actor="a")
+    with pytest.raises(WorkspaceError, match="actions are locked"):
+        ws.create_action("too-late", "Too late", actor="a")
+    with pytest.raises(WorkspaceError, match="actions are locked"):
+        ws.amend_action(action.action_id, "Too late", actor="a")
+
+
+def test_report_includes_actions_and_action_amendments(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    ws.add_evidence(str(evidence_file), note="n", actor="a")
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Initial claim", actor="a", observation_refs=[obs.observation_id])
+    action = ws.create_action("credential-revocation", "Revoke credential", actor="a",
+                              claim_refs=[claim.claim_id], observation_refs=[obs.observation_id])
+    amendment = ws.update_action_outcome(action.action_id, "Credential revoked", actor="a")
+
+    md = ws.generate_report(actor="a")
+
+    assert "## Actions" in md
+    assert "### Action amendments" in md
+    assert action.action_id in md
+    assert amendment.amendment_id in md
+    assert claim.claim_id in md
+    assert obs.observation_id in md
+    assert "Credential revoked" in md
+
+
+def test_verify_actions_detects_deleted_action_record(home: Path):
+    ws = _declare(home)
+    action = ws.create_action("containment", "Block IP", actor="a")
+
+    data = json.loads(ws._actions_path.read_text(encoding="utf-8"))
+    data["actions"] = []
+    ws._actions_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["actions"] is False
+    assert any(f"{action.action_id}: audit event has no action record" in err
+               for err in v["action_errors"])
+
+
+def test_verify_actions_detects_action_metadata_tampering(home: Path):
+    ws = _declare(home)
+    action = ws.create_action("containment", "Block IP", actor="a")
+
+    data = json.loads(ws._actions_path.read_text(encoding="utf-8"))
+    data["actions"][0]["description"] = "Tampered action"
+    ws._actions_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["actions"] is False
+    assert any(action.action_id in err for err in v["action_errors"])
+
+
+def test_verify_actions_detects_amendment_tampering_and_deletion(home: Path):
+    ws = _declare(home)
+    action = ws.create_action("containment", "Block IP", actor="a")
+    amendment = ws.amend_action(action.action_id, "Block IP 203.0.113.10", actor="a")
+
+    data = json.loads(ws._actions_path.read_text(encoding="utf-8"))
+    data["amendments"][0]["text"] = "Tampered correction"
+    ws._actions_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["actions"] is False
+    assert any(amendment.amendment_id in err for err in v["action_errors"])
+
+    reloaded = IncidentWorkspace.load(home, ws.incident_id)
+    data = json.loads(reloaded._actions_path.read_text(encoding="utf-8"))
+    data["amendments"] = []
+    reloaded._actions_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = reloaded.verify()
+    assert v["actions"] is False
+    assert any(f"{amendment.amendment_id}: audit event has no action amendment record" in err
+               for err in v["action_errors"])
+
+
+def test_verify_actions_detects_status_after_cancellation_in_store(home: Path):
+    ws = _declare(home)
+    action = ws.create_action("containment", "Block IP", actor="a")
+    ws.cancel_action(action.action_id, "No longer needed", actor="a")
+
+    data = json.loads(ws._actions_path.read_text(encoding="utf-8"))
+    status = dict(data["amendments"][0])
+    status["amendment_id"] = "AAM-MANUALSTAT1"
+    status["amendment_type"] = "STATUS"
+    status["created_at"] = "9999-01-01T00:00:00Z"
+    status["status"] = "COMPLETED"
+    status["text"] = "Manual status after cancellation"
+    status["reason"] = "Bad persisted order"
+    data["amendments"].append(status)
+    ws._actions_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["actions"] is False
+    assert any("status after cancellation" in err for err in v["action_errors"])
+
+
 # ---- gates + report ---------------------------------------------------------- #
 
 def test_gates_progress_from_declare_to_report(home: Path, evidence_file: Path):

@@ -1,12 +1,17 @@
 """Incident workspace domain model for Coreline."""
 
 from .workspace import (
+    Action,
+    ActionAmendment,
+    ACTION_AMENDMENT_TYPES,
+    ACTION_STATUSES,
     AuditEntry,
     Claim,
     ClaimAmendment,
     CLAIM_AMENDMENT_TYPES,
     CLAIM_STATUSES,
     EffectiveClaim,
+    EffectiveAction,
     EffectiveObservation,
     Gate,
     IncidentWorkspace,
@@ -23,12 +28,17 @@ from .workspace import (
 )
 
 __all__ = [
+    "Action",
+    "ActionAmendment",
+    "ACTION_AMENDMENT_TYPES",
+    "ACTION_STATUSES",
     "AuditEntry",
     "Claim",
     "ClaimAmendment",
     "CLAIM_AMENDMENT_TYPES",
     "CLAIM_STATUSES",
     "EffectiveClaim",
+    "EffectiveAction",
     "EffectiveObservation",
     "Gate",
     "IncidentWorkspace",

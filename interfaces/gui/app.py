@@ -14,6 +14,7 @@ from typing import Iterable
 import streamlit as st
 
 from core.incident import (
+    ACTION_STATUSES,
     CLAIM_STATUSES,
     IncidentWorkspace,
     WorkspaceError,
@@ -64,6 +65,11 @@ ACTION_COLOR = {
     "claim-corrected": WARN,
     "claim-status-updated": OK,
     "claim-withdrawn": BAD,
+    "action-created": GOOD,
+    "action-corrected": WARN,
+    "action-status-updated": OK,
+    "action-outcome-updated": "#a78bfa",
+    "action-cancelled": BAD,
     "lifecycle-transition": OK,
     "report-generated": "#a78bfa",
     "incident-closed": MUTED,
@@ -122,7 +128,7 @@ def row_html(title: str, body: str, color: str = LINE, meta: str = "") -> str:
 
 
 def gate_trust(gates) -> tuple[bool, str]:
-    trust_keys = {"custody", "signature", "audit", "storage", "observations", "claims"}
+    trust_keys = {"custody", "signature", "audit", "storage", "observations", "claims", "actions"}
     relevant = [g for g in gates if g.key in trust_keys]
     ok = all(g.passed for g in relevant)
     return ok, "Integrity verified" if ok else "Integrity issue detected"
@@ -181,7 +187,7 @@ def render_sidebar() -> str:
     st.sidebar.markdown("---")
     nav = st.sidebar.radio(
         "Workspace",
-        ("Overview", "Evidence", "Observations", "Claims", "Timeline", "Reports"),
+        ("Overview", "Evidence", "Observations", "Claims", "Actions", "Timeline", "Reports"),
         key="workspace_nav",
     )
     st.sidebar.markdown("---")
@@ -265,7 +271,7 @@ def render_overview(ws: IncidentWorkspace) -> None:
     c1.metric("Evidence", state.get("evidence_count", 0))
     c2.metric("Observations", state.get("observation_count", 0))
     c3.metric("Claims", state.get("claim_count", 0))
-    c4.metric("Updated", str(state.get("updated_at", ""))[:10])
+    c4.metric("Actions", state.get("action_count", 0))
 
     st.markdown('<div class="band"></div>', unsafe_allow_html=True)
     left, right = st.columns([1.25, 1])
@@ -321,7 +327,7 @@ def render_overview(ws: IncidentWorkspace) -> None:
             meta = f"#{entry.seq} · {entry.timestamp[:19].replace('T', ' ')}Z · {entry.actor}"
             detail = ", ".join(
                 f"{k}={str(v)[:32]}" for k, v in entry.detail.items()
-                if k in ("severity", "title", "file", "note", "sha256", "observation_id", "claim_id", "amendment_id")
+                if k in ("severity", "title", "file", "note", "sha256", "observation_id", "claim_id", "action_id", "amendment_id")
             )
             st.markdown(row_html(entry.action, escape(detail), color=color, meta=meta),
                         unsafe_allow_html=True)
@@ -598,6 +604,142 @@ def render_claims(ws: IncidentWorkspace) -> None:
                             st.error(str(exc))
 
 
+def render_actions(ws: IncidentWorkspace) -> None:
+    st.markdown('<div class="section-title">Actions</div>', unsafe_allow_html=True)
+    claim_options = [claim.claim_id for claim in ws.claims()]
+    observation_options = [obs.observation_id for obs in ws.observations()]
+    evidence_options = [item.sha256 for item in ws.evidence_items()]
+
+    with st.form("action", clear_on_submit=True):
+        action_type = st.text_input(
+            "Action type",
+            placeholder="credential-revocation, host-isolation, firewall-block",
+            disabled=ws.is_closed,
+        )
+        description = st.text_area(
+            "Action description",
+            height=100,
+            placeholder="Revoked exposed deployment credential in production IAM account",
+            disabled=ws.is_closed,
+        )
+        c1, c2 = st.columns([1, 1])
+        status = c1.selectbox("Status", ACTION_STATUSES, disabled=ws.is_closed)
+        subject = c2.text_input("Subject/system", placeholder="user@example.com, host-01, prod-db",
+                                disabled=ws.is_closed)
+        claim_refs = st.multiselect("Supporting claims", claim_options, disabled=ws.is_closed)
+        observation_refs = st.multiselect("Supporting observations", observation_options, disabled=ws.is_closed)
+        evidence_refs = st.multiselect(
+            "Supporting evidence",
+            evidence_options,
+            format_func=lambda h: short_hash(h, 16),
+            disabled=ws.is_closed,
+        )
+        outcome = st.text_area("Outcome", height=80, disabled=ws.is_closed)
+        if st.form_submit_button("Record action", type="primary", disabled=ws.is_closed):
+            try:
+                ws.create_action(
+                    action_type=action_type,
+                    description=description,
+                    actor=ACTOR,
+                    status=status,
+                    subject=subject,
+                    claim_refs=list(claim_refs),
+                    observation_refs=list(observation_refs),
+                    evidence_refs=list(evidence_refs),
+                    outcome=outcome,
+                )
+                st.rerun()
+            except WorkspaceError as exc:
+                st.error(str(exc))
+
+    actions = ws.actions()
+    if not actions:
+        st.info("No actions recorded yet.")
+        return
+
+    st.markdown('<div class="band"></div>', unsafe_allow_html=True)
+    for action in actions:
+        effective = ws.effective_action(action.action_id)
+        subject = f" · {action.subject}" if action.subject else ""
+        refs = []
+        refs.extend(action.claims)
+        refs.extend(action.observations)
+        refs.extend(short_hash(sha, 12) for sha in action.evidence)
+        refs_text = ", ".join(refs) or "no references"
+        meta = (
+            f"{effective.current_status} · {action.action_type}{subject} · "
+            f"created {action.created_at[:19].replace('T', ' ')}Z by {action.actor}"
+        )
+        st.markdown(
+            row_html(
+                action.action_id,
+                f"{escape(effective.current_description)}<br>"
+                f"<span class=\"mono\">refs {escape(refs_text)}</span>",
+                color=BAD if effective.current_status == "CANCELLED" else GOOD,
+                meta=meta,
+            ),
+            unsafe_allow_html=True,
+        )
+        with st.expander(f"Inspect / amend {action.action_id}", expanded=False):
+            if action.description != effective.current_description:
+                st.caption(f"Original action: {action.description}")
+            if effective.current_outcome:
+                st.caption(f"Outcome: {effective.current_outcome}")
+            for amendment in effective.amendments:
+                status_text = f" -> {amendment.status}" if amendment.status else ""
+                outcome_text = f" outcome={amendment.outcome}" if amendment.outcome else ""
+                st.caption(
+                    f"{amendment.amendment_type}{status_text}{outcome_text} "
+                    f"{amendment.amendment_id} {amendment.created_at[:19].replace('T', ' ')}Z: "
+                    f"{amendment.text}"
+                )
+            c1, c2, c3, c4 = st.columns(4)
+            locked = ws.is_closed or bool(effective.cancellation)
+            with c1:
+                with st.form(f"action-correct-{action.action_id}"):
+                    correction = st.text_area("Correction", height=90, disabled=locked)
+                    reason = st.text_input("Reason", disabled=locked)
+                    if st.form_submit_button("Save action correction", disabled=locked):
+                        try:
+                            ws.amend_action(action.action_id, correction, ACTOR, reason=reason)
+                            st.rerun()
+                        except WorkspaceError as exc:
+                            st.error(str(exc))
+            with c2:
+                with st.form(f"action-status-{action.action_id}"):
+                    status = st.selectbox(
+                        "Status update",
+                        tuple(s for s in ACTION_STATUSES if s != "CANCELLED"),
+                        disabled=locked,
+                    )
+                    reason = st.text_area("Reason", height=90, disabled=locked)
+                    if st.form_submit_button("Save action status", disabled=locked):
+                        try:
+                            ws.update_action_status(action.action_id, status, ACTOR, reason)
+                            st.rerun()
+                        except WorkspaceError as exc:
+                            st.error(str(exc))
+            with c3:
+                with st.form(f"action-outcome-{action.action_id}"):
+                    outcome = st.text_area("Outcome update", height=90, disabled=locked)
+                    reason = st.text_input("Reason", disabled=locked)
+                    if st.form_submit_button("Save outcome", disabled=locked):
+                        try:
+                            ws.update_action_outcome(action.action_id, outcome, ACTOR, reason=reason)
+                            st.rerun()
+                        except WorkspaceError as exc:
+                            st.error(str(exc))
+            with c4:
+                with st.form(f"action-cancel-{action.action_id}"):
+                    reason = st.text_area("Cancellation reason", height=90, disabled=locked)
+                    if st.form_submit_button("Cancel action", disabled=locked):
+                        try:
+                            ws.cancel_action(action.action_id, reason, ACTOR)
+                            st.rerun()
+                        except WorkspaceError as exc:
+                            st.error(str(exc))
+
+
 def render_timeline(ws: IncidentWorkspace, verify_result) -> None:
     st.markdown('<div class="section-title">Timeline</div>', unsafe_allow_html=True)
     if verify_result["audit_chain"]:
@@ -610,7 +752,7 @@ def render_timeline(ws: IncidentWorkspace, verify_result) -> None:
         meta = f"#{entry.seq} · {entry.timestamp[:19].replace('T', ' ')}Z · {entry.actor}"
         detail = ", ".join(
             f"{k}={str(v)[:48]}" for k, v in entry.detail.items()
-            if k in ("severity", "title", "file", "note", "sha256", "observation_id", "amendment_id", "claim_id", "status")
+            if k in ("severity", "title", "file", "note", "sha256", "observation_id", "amendment_id", "claim_id", "action_id", "status")
             and v not in (None, "")
         )
         hash_text = f'<span class="mono">hash {entry.entry_hash()[:12]}...</span>'
@@ -688,6 +830,8 @@ with main_col:
         render_observations(ws)
     elif nav == "Claims":
         render_claims(ws)
+    elif nav == "Actions":
+        render_actions(ws)
     elif nav == "Timeline":
         render_timeline(ws, verify_result)
     elif nav == "Reports":

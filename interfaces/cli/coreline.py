@@ -32,6 +32,9 @@ from rich.markdown import Markdown
 from rich import box
 
 from core.incident import (
+    Action,
+    ActionAmendment,
+    ACTION_STATUSES,
     Claim,
     ClaimAmendment,
     CLAIM_STATUSES,
@@ -96,12 +99,14 @@ registry_app = typer.Typer(no_args_is_help=True, help="Trusted signer registry."
 lifecycle_app = typer.Typer(no_args_is_help=True, help="Incident lifecycle transitions.")
 observe_app = typer.Typer(no_args_is_help=True, help="Investigative observations.")
 claim_app = typer.Typer(no_args_is_help=True, help="Investigative claims.")
+action_app = typer.Typer(no_args_is_help=True, help="Responder actions.")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(timeline_app, name="timeline")
 app.add_typer(registry_app, name="registry")
 app.add_typer(lifecycle_app, name="lifecycle")
 app.add_typer(observe_app, name="observe")
 app.add_typer(claim_app, name="claim")
+app.add_typer(action_app, name="action")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -196,6 +201,57 @@ def _claim_amendment_rows(table: Table, amendments: List[ClaimAmendment]) -> Non
             amendment.amendment_type,
             amendment.status or "",
             amendment.text,
+            amendment.reason or "",
+        )
+
+
+def _action_refs(values: tuple[str, ...], *, short: bool = False) -> str:
+    if not values:
+        return "none"
+    if short:
+        return ", ".join(value[:12] for value in values)
+    return ", ".join(values)
+
+
+def _action_panel(
+    action: Action,
+    current_status: Optional[str] = None,
+    current_description: Optional[str] = None,
+    current_outcome: Optional[str] = None,
+) -> Panel:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("action", Text(action.action_id, style=C_ACCENT))
+    table.add_row("incident", action.incident_id)
+    table.add_row("created", action.created_at)
+    table.add_row("actor", action.actor)
+    table.add_row("type", action.action_type)
+    table.add_row("status", current_status or action.status)
+    if action.subject:
+        table.add_row("subject", action.subject)
+    table.add_row("claims", _action_refs(action.claims))
+    table.add_row("observations", _action_refs(action.observations))
+    table.add_row("evidence", _evidence_refs(action.evidence))
+    table.add_row("description", current_description or action.description)
+    if current_description and current_description != action.description:
+        table.add_row("original description", action.description)
+    outcome = current_outcome if current_outcome is not None else action.outcome
+    if outcome:
+        table.add_row("outcome", outcome)
+    return Panel(table, title="[bold]ACTION[/]", border_style="cyan",
+                 box=box.ROUNDED)
+
+
+def _action_amendment_rows(table: Table, amendments: List[ActionAmendment]) -> None:
+    for amendment in amendments:
+        table.add_row(
+            amendment.amendment_id,
+            amendment.created_at.replace("T", " ")[:19],
+            amendment.amendment_type,
+            amendment.status or "",
+            amendment.text,
+            amendment.outcome or "",
             amendment.reason or "",
         )
 
@@ -649,6 +705,206 @@ def claim_withdraw(
         console.print(f"[{C_BAD}]✗ {e}[/]")
         raise typer.Exit(code=1)
     console.print(f"[{C_OK}]✓ claim withdrawal recorded[/] {amendment.amendment_id}")
+
+
+# ---- actions --------------------------------------------------------------- #
+
+@action_app.command("create")
+def action_create(
+    action_type: str = typer.Option(..., "--type", "-t", help="Action type, e.g. credential-revocation."),
+    description: str = typer.Option(..., "--description", "-d", help="What the responder did or plans to do."),
+    status: str = typer.Option("PLANNED", "--status", "-s", help=f"One of {', '.join(ACTION_STATUSES)}."),
+    subject: Optional[str] = typer.Option(None, "--subject", help="Optional affected user, host, system, or account."),
+    claim: Optional[List[str]] = typer.Option(None, "--claim", "-c", help="Supporting claim ID."),
+    observation: Optional[List[str]] = typer.Option(None, "--observation", "-o", help="Supporting observation ID."),
+    evidence: Optional[List[str]] = typer.Option(None, "--evidence", "-e", help="Supporting evidence SHA-256 or prefix."),
+    outcome: Optional[str] = typer.Option(None, "--outcome", help="Optional initial action outcome."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Record an immutable responder action."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        action = ws.create_action(
+            action_type=action_type,
+            description=description,
+            actor=who,
+            status=status,
+            subject=subject,
+            claim_refs=claim or [],
+            observation_refs=observation or [],
+            evidence_refs=evidence or [],
+            outcome=outcome,
+        )
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(_action_panel(action))
+
+
+@action_app.command("list")
+def action_list(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """List responder actions for an incident."""
+    ws = _load(home, incident_id)
+    actions = ws.actions()
+    table = Table(
+        title=f"[bold]ACTIONS[/]  {ws.incident_id}",
+        box=box.SIMPLE_HEAVY,
+        header_style=C_ACCENT,
+        border_style="cyan",
+        pad_edge=False,
+    )
+    table.add_column("id", style=C_ACCENT, no_wrap=True)
+    table.add_column("created", style=C_DIM, no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("type", no_wrap=True)
+    table.add_column("refs", style=C_DIM, no_wrap=True)
+    table.add_column("action", overflow="fold", ratio=1)
+    for action in actions:
+        effective = ws.effective_action(action.action_id)
+        refs = []
+        refs.extend(action.claims)
+        refs.extend(action.observations)
+        refs.extend(sha[:12] for sha in action.evidence)
+        table.add_row(
+            action.action_id[:12],
+            action.created_at.replace("T", " ")[:19],
+            effective.current_status,
+            action.action_type,
+            ", ".join(refs) if refs else "none",
+            effective.current_description,
+        )
+    console.print(table)
+    if actions:
+        console.print(
+            f"[{C_DIM}]ids: "
+            f"{', '.join(f'{action.action_id[:12]} ({action.action_type})' for action in actions)}[/]"
+        )
+    console.print(f"[{C_DIM}]{len(actions)} action(s)[/]")
+
+
+@action_app.command("show")
+def action_show(
+    action_id: str = typer.Argument(..., help="Action ID."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Show one responder action."""
+    ws = _load(home, incident_id)
+    try:
+        action = ws.action(action_id)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    effective = ws.effective_action(action_id)
+    console.print(_action_panel(
+        action,
+        effective.current_status,
+        effective.current_description,
+        effective.current_outcome,
+    ))
+    amendments = ws.action_amendments(action_id)
+    if amendments:
+        table = Table(
+            title=f"[bold]ACTION AMENDMENTS[/]  {action_id}",
+            box=box.SIMPLE_HEAVY,
+            header_style=C_ACCENT,
+            border_style="cyan",
+            pad_edge=False,
+        )
+        table.add_column("id", style=C_ACCENT, no_wrap=True)
+        table.add_column("created", style=C_DIM, no_wrap=True)
+        table.add_column("type", no_wrap=True)
+        table.add_column("status", no_wrap=True)
+        table.add_column("text", overflow="fold", ratio=1)
+        table.add_column("outcome", overflow="fold", ratio=1)
+        table.add_column("reason", overflow="fold", ratio=1)
+        _action_amendment_rows(table, amendments)
+        console.print(table)
+
+
+@action_app.command("amend")
+def action_amend(
+    action_id: str = typer.Argument(..., help="Action ID."),
+    correction: str = typer.Option(..., "--description", "-d", help="Corrected action description."),
+    reason: Optional[str] = typer.Option(None, "--reason", "-r", help="Optional correction reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a correction to an immutable action."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.amend_action(action_id, correction, who, reason=reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ action correction recorded[/] {amendment.amendment_id}")
+
+
+@action_app.command("status")
+def action_status(
+    action_id: str = typer.Argument(..., help="Action ID."),
+    status: str = typer.Option(..., "--status", "-s", help=f"One of {', '.join(ACTION_STATUSES)} except CANCELLED."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Reason for the status change."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a status update to an immutable action."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.update_action_status(action_id, status, who, reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ action status recorded[/] {amendment.amendment_id}")
+
+
+@action_app.command("outcome")
+def action_outcome(
+    action_id: str = typer.Argument(..., help="Action ID."),
+    outcome: str = typer.Option(..., "--outcome", "-o", help="Action outcome."),
+    reason: Optional[str] = typer.Option(None, "--reason", "-r", help="Optional outcome update reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append an outcome update to an immutable action."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.update_action_outcome(action_id, outcome, who, reason=reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ action outcome recorded[/] {amendment.amendment_id}")
+
+
+@action_app.command("cancel")
+def action_cancel(
+    action_id: str = typer.Argument(..., help="Action ID."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Cancellation reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a cancellation to an immutable action."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.cancel_action(action_id, reason, who)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ action cancellation recorded[/] {amendment.amendment_id}")
 
 
 # ---- lifecycle -------------------------------------------------------------- #

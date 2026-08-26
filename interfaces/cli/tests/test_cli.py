@@ -20,7 +20,7 @@ def test_help_lists_all_commands():
     assert res.exit_code == 0
     for cmd in (
         "declare", "doctor", "evidence", "timeline", "status", "report",
-        "use", "close", "verify", "registry", "lifecycle", "observe", "claim",
+        "use", "close", "verify", "registry", "lifecycle", "observe", "claim", "action",
     ):
         assert cmd in res.output
 
@@ -292,6 +292,106 @@ def test_claim_add_list_show_and_rejects_bad_observation(tmp_path: Path):
     assert "claim-corrected" in r.output
     assert "claim-status-updated" in r.output
     assert "claim-withdrawn" in r.output
+
+
+def test_action_create_list_show_and_amendment_flow(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "edr.log"
+    ev.write_text("host isolation telemetry\n", encoding="utf-8")
+
+    r = _run(["declare", "--title", "Host compromise", "--severity", "SEV1"], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["evidence", "add", "--file", str(ev), "--note", "EDR telemetry"], home)
+    assert r.exit_code == 0, r.output
+
+    iid = (home / "CURRENT").read_text(encoding="utf-8").strip()
+    manifest = json.loads((home / iid / "manifest.json").read_text(encoding="utf-8"))
+    sha = manifest["items"][0]["sha256"]
+
+    r = _run(["observe", "add", "--text", "EDR shows malware execution", "--evidence", sha[:16]], home)
+    assert r.exit_code == 0, r.output
+    obs_id = next(part for part in r.output.split() if part.startswith("OBS-"))
+
+    r = _run(["claim", "add", "--text", "Host was compromised", "--observation", obs_id], home)
+    assert r.exit_code == 0, r.output
+    claim_id = next(part for part in r.output.split() if part.startswith("CLM-"))
+
+    r = _run([
+        "action", "create",
+        "--type", "host-isolation",
+        "--description", "Isolated compromised host",
+        "--status", "INITIATED",
+        "--subject", "host-01",
+        "--claim", claim_id,
+        "--observation", obs_id,
+        "--evidence", sha[:16],
+        "--outcome", "Isolation command sent",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "ACTION" in r.output
+    action_id = next(part for part in r.output.split() if part.startswith("ACT-"))
+
+    r = _run(["action", "list"], home)
+    assert r.exit_code == 0, r.output
+    assert action_id[:12] in r.output
+    assert "host-isolation" in r.output
+
+    r = _run(["action", "show", action_id], home)
+    assert r.exit_code == 0, r.output
+    assert claim_id in r.output
+    assert obs_id in r.output
+    assert sha[:12] in r.output
+
+    r = _run([
+        "action", "amend", action_id,
+        "--description", "Isolated host-01 from production network",
+        "--reason", "Add hostname",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "action correction recorded" in r.output
+
+    r = _run([
+        "action", "status", action_id,
+        "--status", "COMPLETED",
+        "--reason", "EDR confirmed isolation",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "action status recorded" in r.output
+
+    r = _run([
+        "action", "outcome", action_id,
+        "--outcome", "Host isolation confirmed",
+        "--reason", "EDR state verified",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "action outcome recorded" in r.output
+
+    r = _run(["action", "show", action_id], home)
+    assert r.exit_code == 0, r.output
+    assert "ACTION AMENDMENTS" in r.output
+    assert "CORRECTION" in r.output
+    assert "STATUS" in r.output
+    assert "OUTCOME" in r.output
+
+    r = _run(["action", "cancel", action_id, "--reason", "Superseded by containment playbook"], home)
+    assert r.exit_code == 0, r.output
+    assert "action cancellation recorded" in r.output
+
+    r = _run(["action", "amend", action_id, "--description", "too late"], home)
+    assert r.exit_code == 1
+    assert "cancelled" in r.output
+
+    r = _run(["action", "create", "--type", "bad", "--description", "bad", "--claim", "CLM-NOPE"], home)
+    assert r.exit_code == 1
+    assert "claim not found" in r.output
+
+    r = _run(["timeline", "show"], home)
+    assert r.exit_code == 0, r.output
+    assert "action-created" in r.output
+    assert "action-corrected" in r.output
+    assert "action-status-updated" in r.output
+    assert "action-outcome-updated" in r.output
+    assert "action-cancelled" in r.output
 
 
 def test_lifecycle_contain_and_resolve_flow(tmp_path: Path):
