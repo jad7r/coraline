@@ -52,6 +52,8 @@ from core.storage.local import LocalFileBackend
 SEVERITIES = ("SEV1", "SEV2", "SEV3", "SEV4", "SEV5")
 OBSERVATION_DISPOSITIONS = ("OBSERVED", "SUSPECTED", "REFUTED", "INCONCLUSIVE")
 OBSERVATION_AMENDMENT_TYPES = ("CORRECTION", "RETRACTION")
+CLAIM_STATUSES = ("ASSERTED", "SUPPORTED", "REFUTED", "INCONCLUSIVE")
+CLAIM_AMENDMENT_TYPES = ("CORRECTION", "STATUS", "WITHDRAWAL")
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA256_PREFIX_RE = re.compile(r"^[0-9a-f]{12,63}$")
 
@@ -266,6 +268,120 @@ class EffectiveObservation:
     retraction: Optional[ObservationAmendment] = None
 
 
+@dataclass(frozen=True)
+class Claim:
+    """One immutable investigative claim derived from observation records."""
+
+    claim_id: str
+    incident_id: str
+    text: str
+    created_at: str
+    creator: str
+    status: str = "ASSERTED"
+    observations: Tuple[str, ...] = ()
+    subject: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "claim_id": self.claim_id,
+            "incident_id": self.incident_id,
+            "text": self.text,
+            "created_at": self.created_at,
+            "creator": self.creator,
+            "status": self.status,
+            "observations": list(self.observations),
+        }
+        if self.subject:
+            d["subject"] = self.subject
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Claim":
+        return cls(
+            claim_id=str(d["claim_id"]),
+            incident_id=str(d["incident_id"]),
+            text=str(d["text"]),
+            created_at=str(d["created_at"]),
+            creator=str(d["creator"]),
+            status=str(d.get("status", "ASSERTED")).upper(),
+            observations=tuple(str(o) for o in d.get("observations", [])),
+            subject=str(d["subject"]) if d.get("subject") else None,
+        )
+
+    def text_hash(self) -> str:
+        return sha256_bytes(self.text.encode("utf-8"))
+
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class ClaimAmendment:
+    """Append-only correction, status change, or withdrawal for an immutable claim."""
+
+    amendment_id: str
+    claim_id: str
+    incident_id: str
+    amendment_type: str
+    created_at: str
+    creator: str
+    text: str
+    status: Optional[str] = None
+    reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "amendment_id": self.amendment_id,
+            "claim_id": self.claim_id,
+            "incident_id": self.incident_id,
+            "amendment_type": self.amendment_type,
+            "created_at": self.created_at,
+            "creator": self.creator,
+            "text": self.text,
+        }
+        if self.status:
+            d["status"] = self.status
+        if self.reason:
+            d["reason"] = self.reason
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "ClaimAmendment":
+        return cls(
+            amendment_id=str(d["amendment_id"]),
+            claim_id=str(d["claim_id"]),
+            incident_id=str(d["incident_id"]),
+            amendment_type=str(d["amendment_type"]).upper(),
+            created_at=str(d["created_at"]),
+            creator=str(d["creator"]),
+            text=str(d["text"]),
+            status=str(d["status"]).upper() if d.get("status") else None,
+            reason=str(d["reason"]) if d.get("reason") else None,
+        )
+
+    def text_hash(self) -> str:
+        return sha256_bytes(self.text.encode("utf-8"))
+
+    def reason_hash(self) -> Optional[str]:
+        return sha256_bytes(self.reason.encode("utf-8")) if self.reason else None
+
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class EffectiveClaim:
+    """Deterministic current view of an immutable claim plus amendments."""
+
+    claim: Claim
+    amendments: Tuple[ClaimAmendment, ...]
+    current_status: str
+    current_text: str
+    latest_correction: Optional[ClaimAmendment] = None
+    latest_status: Optional[ClaimAmendment] = None
+    withdrawal: Optional[ClaimAmendment] = None
+
+
 # ---- the workspace ----------------------------------------------------------- #
 
 @dataclass
@@ -297,6 +413,10 @@ class IncidentWorkspace:
     @property
     def _observations_path(self) -> Path:
         return self.dir / "observations.json"
+
+    @property
+    def _claims_path(self) -> Path:
+        return self.dir / "claims.json"
 
     @property
     def _sig_path(self) -> Path:
@@ -1179,6 +1299,510 @@ class IncidentWorkspace:
                 errors.append(f"{amendment_id}: audit event hash mismatch")
         return not errors, errors
 
+    # -- claims --------------------------------------------------------------- #
+    def _load_claim_store(self) -> Tuple[List[Claim], List[ClaimAmendment]]:
+        if not self._claims_path.exists():
+            return [], []
+        data = json.loads(self._claims_path.read_text(encoding="utf-8"))
+        claims = [Claim.from_dict(d) for d in data.get("claims", [])]
+        amendments = [
+            ClaimAmendment.from_dict(d)
+            for d in data.get("amendments", [])
+        ]
+        return (
+            sorted(claims, key=lambda c: (c.created_at, c.claim_id)),
+            sorted(amendments, key=lambda a: (a.created_at, a.amendment_id)),
+        )
+
+    def _load_claims(self) -> List[Claim]:
+        claims, _ = self._load_claim_store()
+        return claims
+
+    def _load_claim_amendments(self) -> List[ClaimAmendment]:
+        _, amendments = self._load_claim_store()
+        return amendments
+
+    def _save_claim_store(self, claims: List[Claim], amendments: List[ClaimAmendment]) -> None:
+        ordered = sorted(claims, key=lambda c: (c.created_at, c.claim_id))
+        ordered_amendments = sorted(amendments, key=lambda a: (a.created_at, a.amendment_id))
+        payload = {
+            "version": "1",
+            "incident_id": self.incident_id,
+            "claims": [c.to_dict() for c in ordered],
+            "amendments": [a.to_dict() for a in ordered_amendments],
+        }
+        self._write_text_atomic(
+            self._claims_path,
+            json.dumps(payload, indent=2, sort_keys=True),
+        )
+
+    def _save_claims(self, claims: List[Claim]) -> None:
+        _, amendments = self._load_claim_store()
+        self._save_claim_store(claims, amendments)
+
+    def _save_claim_amendments(self, amendments: List[ClaimAmendment]) -> None:
+        claims, _ = self._load_claim_store()
+        self._save_claim_store(claims, amendments)
+
+    def claims(self) -> List[Claim]:
+        return self._load_claims()
+
+    def claim_amendments(self, claim_id: Optional[str] = None) -> List[ClaimAmendment]:
+        amendments = self._load_claim_amendments()
+        if claim_id:
+            amendments = [a for a in amendments if a.claim_id == claim_id]
+        return amendments
+
+    def claim(self, claim_id: str) -> Claim:
+        for claim in self._load_claims():
+            if claim.claim_id == claim_id:
+                return claim
+        raise WorkspaceError(f"claim not found: {claim_id}")
+
+    def claim_is_withdrawn(self, claim_id: str) -> bool:
+        return any(
+            a.amendment_type == "WITHDRAWAL"
+            for a in self.claim_amendments(claim_id)
+        )
+
+    def effective_claim(self, claim_id: str) -> EffectiveClaim:
+        claim = self.claim(claim_id)
+        amendments = tuple(self.claim_amendments(claim_id))
+        latest_correction: Optional[ClaimAmendment] = None
+        latest_status: Optional[ClaimAmendment] = None
+        withdrawal: Optional[ClaimAmendment] = None
+        for amendment in amendments:
+            if amendment.amendment_type == "WITHDRAWAL" and withdrawal is None:
+                withdrawal = amendment
+            elif amendment.amendment_type == "CORRECTION" and withdrawal is None:
+                latest_correction = amendment
+            elif amendment.amendment_type == "STATUS" and withdrawal is None:
+                latest_status = amendment
+        current_status = "WITHDRAWN" if withdrawal else (
+            latest_status.status if latest_status and latest_status.status else claim.status
+        )
+        current_text = withdrawal.text if withdrawal else (
+            latest_correction.text if latest_correction else claim.text
+        )
+        return EffectiveClaim(
+            claim=claim,
+            amendments=amendments,
+            current_status=current_status,
+            current_text=current_text,
+            latest_correction=latest_correction,
+            latest_status=latest_status,
+            withdrawal=withdrawal,
+        )
+
+    def _resolve_observation_ref(self, ref: str) -> str:
+        value = ref.strip()
+        if not value:
+            raise WorkspaceError("observation reference must not be empty")
+        if "/" in value or "\\" in value:
+            raise WorkspaceError(f"invalid observation reference: {ref}")
+        observations = {obs.observation_id for obs in self._load_observations()}
+        if value in observations:
+            return value
+        raise WorkspaceError(f"observation not found in incident: {ref}")
+
+    @locked_mutation
+    def add_claim(
+        self,
+        text: str,
+        actor: str,
+        observation_refs: List[str],
+        status: str = "ASSERTED",
+        subject: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> Claim:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "claims are locked"
+            )
+        clean_text = text.strip()
+        if not clean_text:
+            raise WorkspaceError("claim text must not be empty")
+        status = status.upper()
+        if status not in CLAIM_STATUSES:
+            raise WorkspaceError(
+                f"invalid claim status {status!r}; choose one of {', '.join(CLAIM_STATUSES)}"
+            )
+        if not observation_refs:
+            raise WorkspaceError("claim requires at least one observation")
+        observations = tuple(
+            sorted({self._resolve_observation_ref(ref) for ref in observation_refs})
+        )
+        for observation_id in observations:
+            if self.observation_is_retracted(observation_id):
+                raise WorkspaceError(f"claim cannot reference retracted observation: {observation_id}")
+        when = when or _now()
+        claim_id = f"CLM-{uuid.uuid4().hex[:12].upper()}"
+        existing = self._load_claims()
+        if any(c.claim_id == claim_id for c in existing):
+            raise WorkspaceError(f"duplicate claim id generated: {claim_id}")
+        claim = Claim(
+            claim_id=claim_id,
+            incident_id=self.incident_id,
+            text=clean_text,
+            created_at=to_iso(when),
+            creator=actor,
+            status=status,
+            observations=observations,
+            subject=subject.strip() if subject and subject.strip() else None,
+        )
+        self._save_claims(existing + [claim])
+        self.state["claim_count"] = len(existing) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "claim-created",
+            {
+                "claim_id": claim.claim_id,
+                "incident_id": self.incident_id,
+                "created_at": claim.created_at,
+                "creator": claim.creator,
+                "status": claim.status,
+                "observations": list(claim.observations),
+                "subject": claim.subject,
+                "record_hash": claim.record_hash(),
+                "text_hash": claim.text_hash(),
+                "text": claim.text,
+            },
+            when,
+        )
+        return claim
+
+    def _new_claim_amendment(
+        self,
+        claim_id: str,
+        amendment_type: str,
+        text: str,
+        actor: str,
+        when: datetime,
+        status: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> ClaimAmendment:
+        amendment = ClaimAmendment(
+            amendment_id=f"CAM-{uuid.uuid4().hex[:12].upper()}",
+            claim_id=claim_id,
+            incident_id=self.incident_id,
+            amendment_type=amendment_type,
+            created_at=to_iso(when),
+            creator=actor,
+            text=text,
+            status=status,
+            reason=reason,
+        )
+        amendments = self._load_claim_amendments()
+        if any(a.amendment_id == amendment.amendment_id for a in amendments):
+            raise WorkspaceError(f"duplicate claim amendment id generated: {amendment.amendment_id}")
+        self._save_claim_amendments(amendments + [amendment])
+        self.state["claim_amendment_count"] = len(amendments) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        return amendment
+
+    @locked_mutation
+    def correct_claim(
+        self,
+        claim_id: str,
+        correction: str,
+        actor: str,
+        reason: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> ClaimAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "claims are locked"
+            )
+        self.claim(claim_id)
+        if self.claim_is_withdrawn(claim_id):
+            raise WorkspaceError(f"claim {claim_id} is withdrawn")
+        clean = correction.strip()
+        if not clean:
+            raise WorkspaceError("claim correction text must not be empty")
+        reason_text = reason.strip() if reason and reason.strip() else None
+        when = when or _now()
+        amendment = self._new_claim_amendment(
+            claim_id,
+            "CORRECTION",
+            clean,
+            actor,
+            when,
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "claim-corrected",
+            {
+                "amendment_id": amendment.amendment_id,
+                "claim_id": claim_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "creator": amendment.creator,
+                "record_hash": amendment.record_hash(),
+                "text_hash": amendment.text_hash(),
+                "reason_hash": amendment.reason_hash(),
+                "correction": amendment.text,
+                "reason": amendment.reason,
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def update_claim_status(
+        self,
+        claim_id: str,
+        status: str,
+        actor: str,
+        reason: str,
+        when: Optional[datetime] = None,
+    ) -> ClaimAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "claims are locked"
+            )
+        self.claim(claim_id)
+        if self.claim_is_withdrawn(claim_id):
+            raise WorkspaceError(f"claim {claim_id} is withdrawn")
+        status = status.upper()
+        if status not in CLAIM_STATUSES:
+            raise WorkspaceError(
+                f"invalid claim status {status!r}; choose one of {', '.join(CLAIM_STATUSES)}"
+            )
+        reason_text = reason.strip()
+        if not reason_text:
+            raise WorkspaceError("claim status reason must not be empty")
+        when = when or _now()
+        amendment = self._new_claim_amendment(
+            claim_id,
+            "STATUS",
+            reason_text,
+            actor,
+            when,
+            status=status,
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "claim-status-updated",
+            {
+                "amendment_id": amendment.amendment_id,
+                "claim_id": claim_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "creator": amendment.creator,
+                "status": amendment.status,
+                "record_hash": amendment.record_hash(),
+                "reason_hash": amendment.reason_hash(),
+                "reason": amendment.reason,
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def withdraw_claim(
+        self,
+        claim_id: str,
+        reason: str,
+        actor: str,
+        when: Optional[datetime] = None,
+    ) -> ClaimAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "claims are locked"
+            )
+        self.claim(claim_id)
+        if self.claim_is_withdrawn(claim_id):
+            raise WorkspaceError(f"claim {claim_id} is already withdrawn")
+        reason_text = reason.strip()
+        if not reason_text:
+            raise WorkspaceError("claim withdrawal reason must not be empty")
+        when = when or _now()
+        amendment = self._new_claim_amendment(
+            claim_id,
+            "WITHDRAWAL",
+            reason_text,
+            actor,
+            when,
+        )
+        self._append_audit(
+            actor,
+            "claim-withdrawn",
+            {
+                "amendment_id": amendment.amendment_id,
+                "claim_id": claim_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "creator": amendment.creator,
+                "record_hash": amendment.record_hash(),
+                "reason_hash": amendment.text_hash(),
+                "reason": amendment.text,
+            },
+            when,
+        )
+        return amendment
+
+    def verify_claims(self) -> Tuple[bool, List[str]]:
+        errors: List[str] = []
+        try:
+            claims, amendments = self._load_claim_store()
+        except Exception as exc:
+            return False, [f"claims unreadable: {exc}"]
+        audits = self._load_audit()
+        claim_events = [
+            e for e in audits
+            if e.action == "claim-created"
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        amendment_events = [
+            e for e in audits
+            if e.action in ("claim-corrected", "claim-status-updated", "claim-withdrawn")
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        claim_by_id = {claim.claim_id: claim for claim in claims}
+        amendments_by_id = {amendment.amendment_id: amendment for amendment in amendments}
+        try:
+            observation_ids = {obs.observation_id for obs in self._load_observations()}
+        except Exception as exc:
+            return False, [f"observations unreadable for claim verification: {exc}"]
+        seen = set()
+        for claim in claims:
+            if claim.claim_id in seen:
+                errors.append(f"{claim.claim_id}: duplicate claim id")
+            seen.add(claim.claim_id)
+            if claim.incident_id != self.incident_id:
+                errors.append(f"{claim.claim_id}: incident id mismatch")
+            if not claim.text.strip():
+                errors.append(f"{claim.claim_id}: empty claim text")
+            if claim.status not in CLAIM_STATUSES:
+                errors.append(f"{claim.claim_id}: invalid claim status")
+            if not claim.observations:
+                errors.append(f"{claim.claim_id}: claim requires at least one observation")
+            for observation_id in claim.observations:
+                if observation_id not in observation_ids:
+                    errors.append(f"{claim.claim_id}: missing observation {observation_id}")
+            matching_audit = any(
+                e.action == "claim-created"
+                and e.detail.get("claim_id") == claim.claim_id
+                and e.detail.get("incident_id") == self.incident_id
+                and e.actor == claim.creator
+                and e.timestamp == claim.created_at
+                and e.detail.get("creator") == claim.creator
+                and e.detail.get("created_at") == claim.created_at
+                and e.detail.get("status") == claim.status
+                and e.detail.get("subject") == claim.subject
+                and e.detail.get("record_hash") == claim.record_hash()
+                and e.detail.get("text_hash") == claim.text_hash()
+                and sorted(e.detail.get("observations", [])) == list(claim.observations)
+                for e in claim_events
+            )
+            if not matching_audit:
+                errors.append(f"{claim.claim_id}: missing matching audit event")
+        for event in claim_events:
+            claim_id = event.detail.get("claim_id")
+            claim = claim_by_id.get(claim_id)
+            if claim is None:
+                errors.append(f"{claim_id}: audit event has no claim record")
+            elif event.detail.get("record_hash") != claim.record_hash():
+                errors.append(f"{claim_id}: audit event hash mismatch")
+
+        claim_ids = {claim.claim_id for claim in claims}
+        amendment_ids = set()
+        withdrawn = set()
+        for amendment in amendments:
+            if amendment.amendment_id in amendment_ids:
+                errors.append(f"{amendment.amendment_id}: duplicate claim amendment id")
+            amendment_ids.add(amendment.amendment_id)
+            if amendment.incident_id != self.incident_id:
+                errors.append(f"{amendment.amendment_id}: incident id mismatch")
+            if amendment.claim_id not in claim_ids:
+                errors.append(f"{amendment.amendment_id}: missing claim {amendment.claim_id}")
+            if amendment.amendment_type not in CLAIM_AMENDMENT_TYPES:
+                errors.append(f"{amendment.amendment_id}: invalid amendment type")
+            if not amendment.text.strip():
+                errors.append(f"{amendment.amendment_id}: empty amendment text")
+            if amendment.amendment_type == "STATUS":
+                if amendment.status not in CLAIM_STATUSES:
+                    errors.append(f"{amendment.amendment_id}: invalid claim status")
+                if not amendment.reason:
+                    errors.append(f"{amendment.amendment_id}: status reason missing")
+                if amendment.claim_id in withdrawn:
+                    errors.append(f"{amendment.amendment_id}: status after withdrawal")
+                matching_audit = any(
+                    e.action == "claim-status-updated"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("claim_id") == amendment.claim_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.creator
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("creator") == amendment.creator
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("status") == amendment.status
+                    and e.detail.get("record_hash") == amendment.record_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            elif amendment.amendment_type == "WITHDRAWAL":
+                if amendment.claim_id in withdrawn:
+                    errors.append(f"{amendment.amendment_id}: duplicate withdrawal")
+                withdrawn.add(amendment.claim_id)
+                matching_audit = any(
+                    e.action == "claim-withdrawn"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("claim_id") == amendment.claim_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.creator
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("creator") == amendment.creator
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("record_hash") == amendment.record_hash()
+                    and e.detail.get("reason_hash") == amendment.text_hash()
+                    for e in amendment_events
+                )
+            else:
+                if amendment.status is not None:
+                    errors.append(f"{amendment.amendment_id}: correction status must be empty")
+                if amendment.claim_id in withdrawn:
+                    errors.append(f"{amendment.amendment_id}: correction after withdrawal")
+                matching_audit = any(
+                    e.action == "claim-corrected"
+                    and e.detail.get("amendment_id") == amendment.amendment_id
+                    and e.detail.get("claim_id") == amendment.claim_id
+                    and e.detail.get("incident_id") == self.incident_id
+                    and e.actor == amendment.creator
+                    and e.timestamp == amendment.created_at
+                    and e.detail.get("amendment_type") == amendment.amendment_type
+                    and e.detail.get("creator") == amendment.creator
+                    and e.detail.get("created_at") == amendment.created_at
+                    and e.detail.get("record_hash") == amendment.record_hash()
+                    and e.detail.get("text_hash") == amendment.text_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            if not matching_audit:
+                errors.append(f"{amendment.amendment_id}: missing matching audit event")
+        for event in amendment_events:
+            amendment_id = event.detail.get("amendment_id")
+            amendment = amendments_by_id.get(amendment_id)
+            if amendment is None:
+                errors.append(f"{amendment_id}: audit event has no claim amendment record")
+            elif event.detail.get("record_hash") != amendment.record_hash():
+                errors.append(f"{amendment_id}: audit event hash mismatch")
+        return not errors, errors
+
     # -- evidence + manifest --------------------------------------------------- #
     def _load_manifest(self) -> EvidenceManifest:
         if self._manifest_path.exists():
@@ -1275,6 +1899,8 @@ class IncidentWorkspace:
             "storage_unverifiable": [],
             "observations": True,
             "observation_errors": [],
+            "claims": True,
+            "claim_errors": [],
         }
         manifest = None
         if self._manifest_path.exists() and self._sig_path.exists():
@@ -1307,6 +1933,9 @@ class IncidentWorkspace:
         observations_ok, observation_errors = self.verify_observations()
         result["observations"] = observations_ok
         result["observation_errors"] = observation_errors
+        claims_ok, claim_errors = self.verify_claims()
+        result["claims"] = claims_ok
+        result["claim_errors"] = claim_errors
         return result
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
@@ -1372,6 +2001,9 @@ class IncidentWorkspace:
             Gate("observations", "Observations reference valid evidence", v["observations"],
                  "verified" if v["observations"]
                  else f"{len(v['observation_errors'])} issue(s)"),
+            Gate("claims", "Claims reference valid observations", v["claims"],
+                 "verified" if v["claims"]
+                 else f"{len(v['claim_errors'])} issue(s)"),
             Gate("report", "PIR generated", report_exists,
                  "present" if report_exists else "not yet generated"),
         ]
@@ -1460,6 +2092,40 @@ class IncidentWorkspace:
                 lines.append(
                     f"| {amendment.amendment_id} | {amendment.observation_id} | "
                     f"{amendment.amendment_type} | {text} | {reason} |"
+                )
+            lines.append("")
+        lines.append("## Claims")
+        lines.append("")
+        claims = self.claims()
+        if claims:
+            lines.append("| ID | Current status | Subject | Observations | Current claim | Original claim |")
+            lines.append("|----|----------------|---------|--------------|---------------|----------------|")
+            for claim in claims:
+                effective = self.effective_claim(claim.claim_id)
+                subject = claim.subject or "-"
+                refs = ", ".join(claim.observations)
+                current_text = effective.current_text.replace("|", "\\|").replace("\n", " ")
+                original_text = claim.text.replace("|", "\\|").replace("\n", " ")
+                lines.append(
+                    f"| {claim.claim_id} | {effective.current_status} | {subject} | "
+                    f"{refs} | {current_text} | {original_text} |"
+                )
+        else:
+            lines.append("_No claims recorded._")
+        lines.append("")
+        claim_amendments = self.claim_amendments()
+        if claim_amendments:
+            lines.append("### Claim amendments")
+            lines.append("")
+            lines.append("| Amendment | Claim | Type | Status | Text | Reason |")
+            lines.append("|-----------|-------|------|--------|------|--------|")
+            for amendment in claim_amendments:
+                status = amendment.status or "-"
+                text = amendment.text.replace("|", "\\|").replace("\n", " ")
+                reason = (amendment.reason or "-").replace("|", "\\|").replace("\n", " ")
+                lines.append(
+                    f"| {amendment.amendment_id} | {amendment.claim_id} | "
+                    f"{amendment.amendment_type} | {status} | {text} | {reason} |"
                 )
             lines.append("")
         lines.append("## Timeline (audit log)")

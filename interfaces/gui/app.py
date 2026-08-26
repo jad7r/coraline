@@ -14,6 +14,7 @@ from typing import Iterable
 import streamlit as st
 
 from core.incident import (
+    CLAIM_STATUSES,
     IncidentWorkspace,
     WorkspaceError,
     SEVERITIES,
@@ -59,6 +60,10 @@ ACTION_COLOR = {
     "observation-created": "#c084fc",
     "observation-corrected": WARN,
     "observation-retracted": BAD,
+    "claim-created": "#2dd4bf",
+    "claim-corrected": WARN,
+    "claim-status-updated": OK,
+    "claim-withdrawn": BAD,
     "lifecycle-transition": OK,
     "report-generated": "#a78bfa",
     "incident-closed": MUTED,
@@ -117,7 +122,7 @@ def row_html(title: str, body: str, color: str = LINE, meta: str = "") -> str:
 
 
 def gate_trust(gates) -> tuple[bool, str]:
-    trust_keys = {"custody", "signature", "audit", "storage", "observations"}
+    trust_keys = {"custody", "signature", "audit", "storage", "observations", "claims"}
     relevant = [g for g in gates if g.key in trust_keys]
     ok = all(g.passed for g in relevant)
     return ok, "Integrity verified" if ok else "Integrity issue detected"
@@ -176,7 +181,7 @@ def render_sidebar() -> str:
     st.sidebar.markdown("---")
     nav = st.sidebar.radio(
         "Workspace",
-        ("Overview", "Evidence", "Observations", "Timeline", "Reports"),
+        ("Overview", "Evidence", "Observations", "Claims", "Timeline", "Reports"),
         key="workspace_nav",
     )
     st.sidebar.markdown("---")
@@ -259,7 +264,7 @@ def render_overview(ws: IncidentWorkspace) -> None:
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Evidence", state.get("evidence_count", 0))
     c2.metric("Observations", state.get("observation_count", 0))
-    c3.metric("Created", str(state.get("created_at", ""))[:10])
+    c3.metric("Claims", state.get("claim_count", 0))
     c4.metric("Updated", str(state.get("updated_at", ""))[:10])
 
     st.markdown('<div class="band"></div>', unsafe_allow_html=True)
@@ -316,7 +321,7 @@ def render_overview(ws: IncidentWorkspace) -> None:
             meta = f"#{entry.seq} · {entry.timestamp[:19].replace('T', ' ')}Z · {entry.actor}"
             detail = ", ".join(
                 f"{k}={str(v)[:32]}" for k, v in entry.detail.items()
-                if k in ("severity", "title", "file", "note", "sha256", "observation_id")
+                if k in ("severity", "title", "file", "note", "sha256", "observation_id", "claim_id", "amendment_id")
             )
             st.markdown(row_html(entry.action, escape(detail), color=color, meta=meta),
                         unsafe_allow_html=True)
@@ -461,6 +466,138 @@ def render_observations(ws: IncidentWorkspace) -> None:
                             st.error(str(exc))
 
 
+def render_claims(ws: IncidentWorkspace) -> None:
+    st.markdown('<div class="section-title">Claims</div>', unsafe_allow_html=True)
+    effective_observations = [
+        ws.effective_observation(obs.observation_id)
+        for obs in ws.observations()
+    ]
+    active_observations = [
+        effective for effective in effective_observations
+        if not effective.retraction
+    ]
+    observation_options = [effective.observation.observation_id for effective in active_observations]
+    observation_text = {
+        effective.observation.observation_id: effective.current_text
+        for effective in active_observations
+    }
+    if not active_observations:
+        st.info("Record a non-retracted observation before adding a claim.")
+    with st.form("claim", clear_on_submit=True):
+        text = st.text_area(
+            "What claim is supported by the investigation record?",
+            height=110,
+            placeholder="Production database was accessed from an unusual source IP",
+            disabled=ws.is_closed or not active_observations,
+        )
+        c1, c2 = st.columns([1, 1])
+        observations = c1.multiselect(
+            "Supporting observations",
+            observation_options,
+            format_func=lambda oid: f"{oid} - {observation_text.get(oid, '')[:70]}",
+            disabled=ws.is_closed or not active_observations,
+        )
+        status = c2.selectbox("Status", CLAIM_STATUSES, disabled=ws.is_closed or not active_observations)
+        subject = st.text_input("Subject/system", placeholder="prod-db, user@example.com, host-01",
+                                disabled=ws.is_closed or not active_observations)
+        if st.form_submit_button("Record claim", type="primary", disabled=ws.is_closed or not active_observations):
+            try:
+                ws.add_claim(
+                    text=text,
+                    actor=ACTOR,
+                    observation_refs=list(observations),
+                    status=status,
+                    subject=subject,
+                )
+                st.rerun()
+            except WorkspaceError as exc:
+                st.error(str(exc))
+
+    claims = ws.claims()
+    if not claims:
+        st.info("No claims recorded yet.")
+        return
+
+    st.markdown('<div class="band"></div>', unsafe_allow_html=True)
+    for claim in claims:
+        effective = ws.effective_claim(claim.claim_id)
+        subject = f" · {claim.subject}" if claim.subject else ""
+        meta = (
+            f"{effective.current_status}{subject} · created {claim.created_at[:19].replace('T', ' ')}Z "
+            f"by {claim.creator}"
+        )
+        refs = ", ".join(claim.observations)
+        st.markdown(
+            row_html(
+                claim.claim_id,
+                f"{escape(effective.current_text)}<br><span class=\"mono\">observations {escape(refs)}</span>",
+                color=BAD if effective.current_status == "WITHDRAWN" else ACCENT,
+                meta=meta,
+            ),
+            unsafe_allow_html=True,
+        )
+        with st.expander(f"Supporting observations for {claim.claim_id}", expanded=False):
+            if claim.text != effective.current_text:
+                st.caption(f"Original claim: {claim.text}")
+            for amendment in effective.amendments:
+                status = f" -> {amendment.status}" if amendment.status else ""
+                st.caption(
+                    f"{amendment.amendment_type}{status} {amendment.amendment_id} "
+                    f"{amendment.created_at[:19].replace('T', ' ')}Z: {amendment.text}"
+                )
+            for observation_id in claim.observations:
+                try:
+                    effective_observation = ws.effective_observation(observation_id)
+                except WorkspaceError as exc:
+                    st.error(str(exc))
+                    continue
+                st.caption(f"{observation_id}: {effective_observation.current_status}")
+                st.write(effective_observation.current_text)
+            c1, c2, c3 = st.columns(3)
+            with c1:
+                with st.form(f"claim-correct-{claim.claim_id}"):
+                    correction = st.text_area(
+                        "Correction",
+                        height=90,
+                        disabled=ws.is_closed or bool(effective.withdrawal),
+                    )
+                    reason = st.text_input("Reason", disabled=ws.is_closed or bool(effective.withdrawal))
+                    if st.form_submit_button("Save claim correction",
+                                             disabled=ws.is_closed or bool(effective.withdrawal)):
+                        try:
+                            ws.correct_claim(claim.claim_id, correction, ACTOR, reason=reason)
+                            st.rerun()
+                        except WorkspaceError as exc:
+                            st.error(str(exc))
+            with c2:
+                with st.form(f"claim-status-{claim.claim_id}"):
+                    status = st.selectbox(
+                        "Status update",
+                        CLAIM_STATUSES,
+                        disabled=ws.is_closed or bool(effective.withdrawal),
+                    )
+                    reason = st.text_area("Reason", height=90,
+                                          disabled=ws.is_closed or bool(effective.withdrawal))
+                    if st.form_submit_button("Save status",
+                                             disabled=ws.is_closed or bool(effective.withdrawal)):
+                        try:
+                            ws.update_claim_status(claim.claim_id, status, ACTOR, reason)
+                            st.rerun()
+                        except WorkspaceError as exc:
+                            st.error(str(exc))
+            with c3:
+                with st.form(f"claim-withdraw-{claim.claim_id}"):
+                    reason = st.text_area("Withdrawal reason", height=90,
+                                          disabled=ws.is_closed or bool(effective.withdrawal))
+                    if st.form_submit_button("Withdraw claim",
+                                             disabled=ws.is_closed or bool(effective.withdrawal)):
+                        try:
+                            ws.withdraw_claim(claim.claim_id, reason, ACTOR)
+                            st.rerun()
+                        except WorkspaceError as exc:
+                            st.error(str(exc))
+
+
 def render_timeline(ws: IncidentWorkspace, verify_result) -> None:
     st.markdown('<div class="section-title">Timeline</div>', unsafe_allow_html=True)
     if verify_result["audit_chain"]:
@@ -473,7 +610,7 @@ def render_timeline(ws: IncidentWorkspace, verify_result) -> None:
         meta = f"#{entry.seq} · {entry.timestamp[:19].replace('T', ' ')}Z · {entry.actor}"
         detail = ", ".join(
             f"{k}={str(v)[:48]}" for k, v in entry.detail.items()
-            if k in ("severity", "title", "file", "note", "sha256", "observation_id", "amendment_id")
+            if k in ("severity", "title", "file", "note", "sha256", "observation_id", "amendment_id", "claim_id", "status")
             and v not in (None, "")
         )
         hash_text = f'<span class="mono">hash {entry.entry_hash()[:12]}...</span>'
@@ -549,6 +686,8 @@ with main_col:
         render_evidence(ws)
     elif nav == "Observations":
         render_observations(ws)
+    elif nav == "Claims":
+        render_claims(ws)
     elif nav == "Timeline":
         render_timeline(ws, verify_result)
     elif nav == "Reports":

@@ -2,6 +2,11 @@
 
 from .workspace import (
     AuditEntry,
+    Claim,
+    ClaimAmendment,
+    CLAIM_AMENDMENT_TYPES,
+    CLAIM_STATUSES,
+    EffectiveClaim,
     EffectiveObservation,
     Gate,
     IncidentWorkspace,
@@ -19,6 +24,11 @@ from .workspace import (
 
 __all__ = [
     "AuditEntry",
+    "Claim",
+    "ClaimAmendment",
+    "CLAIM_AMENDMENT_TYPES",
+    "CLAIM_STATUSES",
+    "EffectiveClaim",
     "EffectiveObservation",
     "Gate",
     "IncidentWorkspace",

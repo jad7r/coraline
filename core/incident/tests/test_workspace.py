@@ -512,6 +512,299 @@ def test_verify_audit_helper_on_clean_chain(home: Path):
     assert ok and bad is None
 
 
+# ---- claims ----------------------------------------------------------------- #
+
+def test_add_claim_references_observations_and_audits(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("CloudTrail shows unusual database access", actor="analyst")
+
+    claim = ws.add_claim(
+        "Production database was accessed from an unusual source",
+        actor="lead@example.com",
+        observation_refs=[obs.observation_id],
+        status="SUPPORTED",
+        subject="prod-db",
+    )
+
+    assert claim.claim_id.startswith("CLM-")
+    assert claim.incident_id == ws.incident_id
+    assert claim.observations == (obs.observation_id,)
+    assert claim.subject == "prod-db"
+    assert ws.state["claim_count"] == 1
+    v = ws.verify()
+    assert v["claims"] is True
+    entry = ws.audit_entries()[-1]
+    assert entry.action == "claim-created"
+    assert entry.actor == "lead@example.com"
+    assert entry.detail["claim_id"] == claim.claim_id
+    assert entry.detail["observations"] == [obs.observation_id]
+    assert entry.detail["record_hash"] == claim.record_hash()
+    assert entry.detail["text_hash"] == claim.text_hash()
+
+
+def test_claim_rejects_missing_path_cross_incident_and_retracted_observations(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    other = IncidentWorkspace.declare(home, title="Other", severity="SEV3", actor="a")
+    other_obs = other.add_observation("Other incident observation", actor="a")
+
+    with pytest.raises(WorkspaceError, match="requires at least one observation"):
+        ws.add_claim("Unsupported claim", actor="a", observation_refs=[])
+    with pytest.raises(WorkspaceError, match="invalid observation reference"):
+        ws.add_claim("Path bypass", actor="a", observation_refs=["/tmp/OBS-NOPE"])
+    with pytest.raises(WorkspaceError, match="observation not found"):
+        ws.add_claim("Missing observation", actor="a", observation_refs=["OBS-NOPE"])
+    with pytest.raises(WorkspaceError, match="observation not found"):
+        ws.add_claim("Cross incident", actor="a", observation_refs=[other_obs.observation_id])
+
+    ws.retract_observation(obs.observation_id, "Invalid source", actor="a")
+    with pytest.raises(WorkspaceError, match="retracted observation"):
+        ws.add_claim("Claim after retraction", actor="a", observation_refs=[obs.observation_id])
+
+
+def test_claim_rejects_malformed_input_and_closed_incident(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    ws.add_evidence(str(evidence_file), note="n", actor="a")
+    obs = ws.add_observation("Initial observation", actor="a")
+
+    with pytest.raises(WorkspaceError, match="claim text must not be empty"):
+        ws.add_claim("   ", actor="a", observation_refs=[obs.observation_id])
+    with pytest.raises(WorkspaceError, match="invalid claim status"):
+        ws.add_claim("x", actor="a", observation_refs=[obs.observation_id], status="CERTAIN")
+
+    ws.close_incident(actor="a")
+    with pytest.raises(WorkspaceError, match="claims are locked"):
+        ws.add_claim("Too late", actor="a", observation_refs=[obs.observation_id])
+
+
+def test_claim_persists_and_report_includes_it(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    ws.add_evidence(str(evidence_file), note="n", actor="a")
+    obs = ws.add_observation("DB audit logs show SELECT on customer table", actor="a")
+    claim = ws.add_claim("Customer table was queried", actor="a", observation_refs=[obs.observation_id])
+
+    reloaded = IncidentWorkspace.load(home, ws.incident_id)
+
+    assert reloaded.claim(claim.claim_id).text == claim.text
+    md = reloaded.generate_report(actor="a")
+    assert "## Claims" in md
+    assert claim.claim_id in md
+    assert obs.observation_id in md
+    assert "Customer table was queried" in md
+
+
+def test_verify_claims_detects_deleted_claim_record(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Derived claim", actor="a", observation_refs=[obs.observation_id])
+
+    data = json.loads(ws._claims_path.read_text(encoding="utf-8"))
+    data["claims"] = []
+    ws._claims_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["claims"] is False
+    assert any(f"{claim.claim_id}: audit event has no claim record" in err
+               for err in v["claim_errors"])
+
+
+def test_verify_claims_detects_claim_metadata_tampering(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Derived claim", actor="a", observation_refs=[obs.observation_id])
+
+    data = json.loads(ws._claims_path.read_text(encoding="utf-8"))
+    data["claims"][0]["creator"] = "mallory@example.com"
+    data["claims"][0]["status"] = "SUPPORTED"
+    ws._claims_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["claims"] is False
+    assert any(claim.claim_id in err for err in v["claim_errors"])
+
+
+def test_verify_claims_detects_removed_claim_audit_event(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Derived claim", actor="a", observation_refs=[obs.observation_id])
+
+    lines = ws._audit_path.read_text(encoding="utf-8").splitlines()
+    ws._audit_path.write_text("\n".join(lines[:-1]) + "\n", encoding="utf-8")
+
+    v = ws.verify()
+    assert v["claims"] is False
+    assert any(f"{claim.claim_id}: missing matching audit event" in err
+               for err in v["claim_errors"])
+
+
+def test_verify_claims_detects_duplicate_ids_and_tampering(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Derived claim", actor="a", observation_refs=[obs.observation_id])
+
+    data = json.loads(ws._claims_path.read_text(encoding="utf-8"))
+    duplicate = dict(data["claims"][0])
+    duplicate["text"] = "Tampered duplicate claim"
+    data["claims"].append(duplicate)
+    ws._claims_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["claims"] is False
+    assert any("duplicate claim id" in err for err in v["claim_errors"])
+    assert any("missing matching audit event" in err for err in v["claim_errors"])
+    assert claim.claim_id in v["claim_errors"][0] or v["claim_errors"]
+
+
+def test_claim_remains_verifiable_when_supporting_observation_is_later_retracted(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Derived claim", actor="a", observation_refs=[obs.observation_id])
+
+    ws.retract_observation(obs.observation_id, "Invalid source", actor="a")
+
+    v = ws.verify()
+    assert v["claims"] is True
+    assert ws.claim(claim.claim_id).observations == (obs.observation_id,)
+
+
+def test_claim_correction_status_and_withdrawal_are_append_only_and_audited(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Original claim", actor="a", observation_refs=[obs.observation_id])
+
+    correction = ws.correct_claim(
+        claim.claim_id,
+        "Corrected claim",
+        actor="reviewer@example.com",
+        reason="Use precise wording",
+    )
+    status = ws.update_claim_status(
+        claim.claim_id,
+        "SUPPORTED",
+        actor="lead@example.com",
+        reason="Second analyst review completed",
+    )
+    withdrawal = ws.withdraw_claim(
+        claim.claim_id,
+        "Claim superseded by later analysis",
+        actor="lead@example.com",
+    )
+
+    assert ws.claim(claim.claim_id).text == "Original claim"
+    effective = ws.effective_claim(claim.claim_id)
+    assert effective.current_status == "WITHDRAWN"
+    assert effective.current_text == "Claim superseded by later analysis"
+    assert effective.latest_correction == correction
+    assert effective.latest_status == status
+    assert effective.withdrawal == withdrawal
+    assert ws.verify()["claims"] is True
+    actions = [e.action for e in ws.audit_entries()]
+    assert "claim-corrected" in actions
+    assert "claim-status-updated" in actions
+    assert "claim-withdrawn" in actions
+
+    with pytest.raises(WorkspaceError, match="withdrawn"):
+        ws.correct_claim(claim.claim_id, "too late", actor="a")
+    with pytest.raises(WorkspaceError, match="withdrawn"):
+        ws.update_claim_status(claim.claim_id, "REFUTED", actor="a", reason="too late")
+    with pytest.raises(WorkspaceError, match="already withdrawn"):
+        ws.withdraw_claim(claim.claim_id, "again", actor="a")
+
+
+def test_claim_amendments_reject_bad_input_and_closed_incident(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    ws.add_evidence(str(evidence_file), note="n", actor="a")
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Initial claim", actor="a", observation_refs=[obs.observation_id])
+
+    with pytest.raises(WorkspaceError, match="correction text"):
+        ws.correct_claim(claim.claim_id, "   ", actor="a")
+    with pytest.raises(WorkspaceError, match="claim status reason"):
+        ws.update_claim_status(claim.claim_id, "SUPPORTED", actor="a", reason="   ")
+    with pytest.raises(WorkspaceError, match="invalid claim status"):
+        ws.update_claim_status(claim.claim_id, "CERTAIN", actor="a", reason="review")
+    with pytest.raises(WorkspaceError, match="withdrawal reason"):
+        ws.withdraw_claim(claim.claim_id, "   ", actor="a")
+    with pytest.raises(WorkspaceError, match="claim not found"):
+        ws.correct_claim("CLM-NOPE", "x", actor="a")
+
+    ws.close_incident(actor="a")
+    with pytest.raises(WorkspaceError, match="claims are locked"):
+        ws.correct_claim(claim.claim_id, "x", actor="a")
+
+
+def test_report_includes_claim_amendments(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    ws.add_evidence(str(evidence_file), note="n", actor="a")
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Initial claim", actor="a", observation_refs=[obs.observation_id])
+    correction = ws.correct_claim(claim.claim_id, "Corrected claim", actor="a")
+    status = ws.update_claim_status(claim.claim_id, "SUPPORTED", actor="a", reason="Review complete")
+
+    md = ws.generate_report(actor="a")
+
+    assert "### Claim amendments" in md
+    assert "Current claim" in md
+    assert correction.amendment_id in md
+    assert status.amendment_id in md
+    assert "Corrected claim" in md
+    assert "Review complete" in md
+
+
+def test_verify_claims_detects_claim_amendment_tampering(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Initial claim", actor="a", observation_refs=[obs.observation_id])
+    amendment = ws.correct_claim(claim.claim_id, "Corrected claim", actor="a")
+
+    data = json.loads(ws._claims_path.read_text(encoding="utf-8"))
+    data["amendments"][0]["text"] = "Tampered correction"
+    ws._claims_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["claims"] is False
+    assert any(amendment.amendment_id in err for err in v["claim_errors"])
+    assert any("missing matching audit event" in err for err in v["claim_errors"])
+
+
+def test_verify_claims_detects_deleted_claim_amendment_record(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Initial claim", actor="a", observation_refs=[obs.observation_id])
+    amendment = ws.correct_claim(claim.claim_id, "Corrected claim", actor="a")
+
+    data = json.loads(ws._claims_path.read_text(encoding="utf-8"))
+    data["amendments"] = []
+    ws._claims_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["claims"] is False
+    assert any(f"{amendment.amendment_id}: audit event has no claim amendment record" in err
+               for err in v["claim_errors"])
+
+
+def test_verify_claims_detects_status_after_withdrawal_in_store(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Initial observation", actor="a")
+    claim = ws.add_claim("Initial claim", actor="a", observation_refs=[obs.observation_id])
+    ws.withdraw_claim(claim.claim_id, "Withdrawn", actor="a")
+
+    data = json.loads(ws._claims_path.read_text(encoding="utf-8"))
+    status = dict(data["amendments"][0])
+    status["amendment_id"] = "CAM-MANUALSTAT1"
+    status["amendment_type"] = "STATUS"
+    status["created_at"] = "9999-01-01T00:00:00Z"
+    status["status"] = "SUPPORTED"
+    status["text"] = "Manual status after withdrawal"
+    status["reason"] = "Bad persisted order"
+    data["amendments"].append(status)
+    ws._claims_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["claims"] is False
+    assert any("status after withdrawal" in err for err in v["claim_errors"])
+
+
 # ---- gates + report ---------------------------------------------------------- #
 
 def test_gates_progress_from_declare_to_report(home: Path, evidence_file: Path):

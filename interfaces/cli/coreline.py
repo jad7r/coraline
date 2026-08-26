@@ -32,6 +32,9 @@ from rich.markdown import Markdown
 from rich import box
 
 from core.incident import (
+    Claim,
+    ClaimAmendment,
+    CLAIM_STATUSES,
     IncidentWorkspace,
     OBSERVATION_DISPOSITIONS,
     Observation,
@@ -92,11 +95,13 @@ timeline_app = typer.Typer(no_args_is_help=True, help="Incident timeline.")
 registry_app = typer.Typer(no_args_is_help=True, help="Trusted signer registry.")
 lifecycle_app = typer.Typer(no_args_is_help=True, help="Incident lifecycle transitions.")
 observe_app = typer.Typer(no_args_is_help=True, help="Investigative observations.")
+claim_app = typer.Typer(no_args_is_help=True, help="Investigative claims.")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(timeline_app, name="timeline")
 app.add_typer(registry_app, name="registry")
 app.add_typer(lifecycle_app, name="lifecycle")
 app.add_typer(observe_app, name="observe")
+app.add_typer(claim_app, name="claim")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -150,6 +155,49 @@ def _observation_panel(obs: Observation) -> Panel:
     table.add_row("text", obs.text)
     return Panel(table, title="[bold]OBSERVATION[/]", border_style="cyan",
                  box=box.ROUNDED)
+
+
+def _claim_refs(observations: tuple[str, ...]) -> str:
+    return ", ".join(observations) if observations else "none"
+
+
+def _claim_refs_short(observations: tuple[str, ...]) -> str:
+    return ", ".join(obs[:12] for obs in observations) if observations else "none"
+
+
+def _claim_panel(
+    claim: Claim,
+    current_status: Optional[str] = None,
+    current_text: Optional[str] = None,
+) -> Panel:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("claim", Text(claim.claim_id, style=C_ACCENT))
+    table.add_row("incident", claim.incident_id)
+    table.add_row("created", claim.created_at)
+    table.add_row("creator", claim.creator)
+    table.add_row("status", current_status or claim.status)
+    if claim.subject:
+        table.add_row("subject", claim.subject)
+    table.add_row("observations", _claim_refs(claim.observations))
+    table.add_row("text", current_text or claim.text)
+    if current_text and current_text != claim.text:
+        table.add_row("original text", claim.text)
+    return Panel(table, title="[bold]CLAIM[/]", border_style="cyan",
+                 box=box.ROUNDED)
+
+
+def _claim_amendment_rows(table: Table, amendments: List[ClaimAmendment]) -> None:
+    for amendment in amendments:
+        table.add_row(
+            amendment.amendment_id,
+            amendment.created_at.replace("T", " ")[:19],
+            amendment.amendment_type,
+            amendment.status or "",
+            amendment.text,
+            amendment.reason or "",
+        )
 
 
 def _amendment_rows(table: Table, amendments: List[ObservationAmendment]) -> None:
@@ -436,6 +484,171 @@ def observe_retract(
         console.print(f"[{C_BAD}]✗ {e}[/]")
         raise typer.Exit(code=1)
     console.print(f"[{C_OK}]✓ retraction recorded[/] {amendment.amendment_id}")
+
+
+# ---- claims ---------------------------------------------------------------- #
+
+@claim_app.command("add")
+def claim_add(
+    text: str = typer.Option(..., "--text", "-t", help="Claim text."),
+    observation: List[str] = typer.Option(
+        ...,
+        "--observation",
+        "-o",
+        help="Supporting observation ID from this incident.",
+    ),
+    status: str = typer.Option(
+        "ASSERTED",
+        "--status",
+        "-s",
+        help=f"One of {', '.join(CLAIM_STATUSES)}.",
+    ),
+    subject: Optional[str] = typer.Option(None, "--subject", help="Optional investigated subject."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Record an immutable claim supported by observation records."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        claim = ws.add_claim(
+            text=text,
+            actor=who,
+            observation_refs=observation,
+            status=status,
+            subject=subject,
+        )
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(_claim_panel(claim))
+
+
+@claim_app.command("list")
+def claim_list(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """List investigative claims for an incident."""
+    ws = _load(home, incident_id)
+    claims = ws.claims()
+    table = Table(
+        title=f"[bold]CLAIMS[/]  {ws.incident_id}",
+        box=box.SIMPLE_HEAVY,
+        header_style=C_ACCENT,
+        border_style="cyan",
+        pad_edge=False,
+    )
+    table.add_column("id", style=C_ACCENT, no_wrap=True)
+    table.add_column("created", style=C_DIM, no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("support", style=C_DIM, no_wrap=True)
+    table.add_column("claim", overflow="fold", ratio=1)
+    for claim in claims:
+        effective = ws.effective_claim(claim.claim_id)
+        table.add_row(
+            claim.claim_id,
+            claim.created_at.replace("T", " ")[:19],
+            effective.current_status,
+            _claim_refs_short(claim.observations),
+            effective.current_text,
+        )
+    console.print(table)
+    console.print(f"[{C_DIM}]{len(claims)} claim(s)[/]")
+
+
+@claim_app.command("show")
+def claim_show(
+    claim_id: str = typer.Argument(..., help="Claim ID."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Show one investigative claim."""
+    ws = _load(home, incident_id)
+    try:
+        claim = ws.claim(claim_id)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    effective = ws.effective_claim(claim_id)
+    console.print(_claim_panel(claim, effective.current_status, effective.current_text))
+    amendments = ws.claim_amendments(claim_id)
+    if amendments:
+        table = Table(
+            title=f"[bold]CLAIM AMENDMENTS[/]  {claim_id}",
+            box=box.SIMPLE_HEAVY,
+            header_style=C_ACCENT,
+            border_style="cyan",
+            pad_edge=False,
+        )
+        table.add_column("id", style=C_ACCENT, no_wrap=True)
+        table.add_column("created", style=C_DIM, no_wrap=True)
+        table.add_column("type", no_wrap=True)
+        table.add_column("status", no_wrap=True)
+        table.add_column("text", overflow="fold", ratio=1)
+        table.add_column("reason", overflow="fold", ratio=1)
+        _claim_amendment_rows(table, amendments)
+        console.print(table)
+
+
+@claim_app.command("correct")
+def claim_correct(
+    claim_id: str = typer.Argument(..., help="Claim ID."),
+    correction: str = typer.Option(..., "--text", "-t", help="Correction text."),
+    reason: Optional[str] = typer.Option(None, "--reason", "-r", help="Optional correction reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a correction to an immutable claim."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.correct_claim(claim_id, correction, who, reason=reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ claim correction recorded[/] {amendment.amendment_id}")
+
+
+@claim_app.command("status")
+def claim_status(
+    claim_id: str = typer.Argument(..., help="Claim ID."),
+    status: str = typer.Option(..., "--status", "-s", help=f"One of {', '.join(CLAIM_STATUSES)}."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Reason for the status change."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a status update to an immutable claim."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.update_claim_status(claim_id, status, who, reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ claim status recorded[/] {amendment.amendment_id}")
+
+
+@claim_app.command("withdraw")
+def claim_withdraw(
+    claim_id: str = typer.Argument(..., help="Claim ID."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Withdrawal reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a withdrawal to an immutable claim."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.withdraw_claim(claim_id, reason, who)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ claim withdrawal recorded[/] {amendment.amendment_id}")
 
 
 # ---- lifecycle -------------------------------------------------------------- #

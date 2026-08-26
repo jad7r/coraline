@@ -20,7 +20,7 @@ def test_help_lists_all_commands():
     assert res.exit_code == 0
     for cmd in (
         "declare", "doctor", "evidence", "timeline", "status", "report",
-        "use", "close", "verify", "registry", "lifecycle", "observe",
+        "use", "close", "verify", "registry", "lifecycle", "observe", "claim",
     ):
         assert cmd in res.output
 
@@ -214,6 +214,84 @@ def test_observe_add_list_show_and_reject_missing_evidence(tmp_path: Path):
     assert "observation-created" in r.output
     assert "observation-corrected" in r.output
     assert "observation-retracted" in r.output
+
+
+def test_claim_add_list_show_and_rejects_bad_observation(tmp_path: Path):
+    home = tmp_path / "incidents"
+
+    r = _run(["declare", "--title", "Credential exposure", "--severity", "SEV2"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run([
+        "observe", "add",
+        "--text", "CloudTrail shows GetSecretValue after credential exposure",
+        "--subject", "prod/app-secret",
+    ], home)
+    assert r.exit_code == 0, r.output
+    obs_id = next(part for part in r.output.split() if part.startswith("OBS-"))
+
+    r = _run([
+        "claim", "add",
+        "--text", "Production secret was accessed by exposed credential",
+        "--observation", obs_id,
+        "--status", "SUPPORTED",
+        "--subject", "prod/app-secret",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "CLAIM" in r.output
+    claim_id = next(part for part in r.output.split() if part.startswith("CLM-"))
+
+    r = _run(["claim", "list"], home)
+    assert r.exit_code == 0, r.output
+    assert claim_id in r.output
+    assert obs_id[:12] in r.output
+    assert "credential" in r.output
+
+    r = _run(["claim", "show", claim_id], home)
+    assert r.exit_code == 0, r.output
+    assert "prod/app-secret" in r.output
+    assert obs_id in r.output
+
+    r = _run([
+        "claim", "correct", claim_id,
+        "--text", "Production secret was accessed after credential exposure",
+        "--reason", "Use precise wording",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "claim correction recorded" in r.output
+
+    r = _run([
+        "claim", "status", claim_id,
+        "--status", "REFUTED",
+        "--reason", "Follow-up IAM review disproved access",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "claim status recorded" in r.output
+
+    r = _run(["claim", "show", claim_id], home)
+    assert r.exit_code == 0, r.output
+    assert "CLAIM AMENDMENTS" in r.output
+    assert "CORRECTION" in r.output
+    assert "STATUS" in r.output
+
+    r = _run(["claim", "withdraw", claim_id, "--reason", "Superseded by final analysis"], home)
+    assert r.exit_code == 0, r.output
+    assert "claim withdrawal recorded" in r.output
+
+    r = _run(["claim", "correct", claim_id, "--text", "too late"], home)
+    assert r.exit_code == 1
+    assert "withdrawn" in r.output
+
+    r = _run(["claim", "add", "--text", "bad", "--observation", "OBS-NOPE"], home)
+    assert r.exit_code == 1
+    assert "observation not found" in r.output
+
+    r = _run(["timeline", "show"], home)
+    assert r.exit_code == 0, r.output
+    assert "claim-created" in r.output
+    assert "claim-corrected" in r.output
+    assert "claim-status-updated" in r.output
+    assert "claim-withdrawn" in r.output
 
 
 def test_lifecycle_contain_and_resolve_flow(tmp_path: Path):

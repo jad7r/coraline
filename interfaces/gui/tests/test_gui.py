@@ -42,12 +42,14 @@ def test_incident_loading_and_navigation(tmp_path: Path):
     blob = _md(at)
     assert "DB Exfiltration Alert" in blob
     assert "Integrity verified" in blob
-    assert at.radio[1].options == ["Overview", "Evidence", "Observations", "Timeline", "Reports"]
+    assert at.radio[1].options == ["Overview", "Evidence", "Observations", "Claims", "Timeline", "Reports"]
 
     _nav(at, "Evidence")
     assert "Evidence" in _md(at)
     _nav(at, "Observations")
     assert "Observations" in _md(at)
+    _nav(at, "Claims")
+    assert "Claims" in _md(at)
     _nav(at, "Timeline")
     assert "AUDIT CHAIN VERIFIED" in _md(at)
 
@@ -137,6 +139,62 @@ def test_observation_create_correct_retract_workflow(tmp_path: Path):
 
     reloaded = type(ws).load(ws.home, ws.incident_id)
     assert reloaded.effective_observation(obs.observation_id).current_status == "RETRACTED"
+
+
+def test_claim_create_workflow(tmp_path: Path):
+    ws = _seed(tmp_path)
+    obs = ws.add_observation("CloudTrail shows database access from unusual source IP", actor="alice@example.com")
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    _nav(at, "Claims")
+
+    at.text_area[0].set_value("Production database was accessed from an unusual source IP")
+    at.multiselect[0].set_value([obs.observation_id])
+    at.selectbox[0].set_value("SUPPORTED")
+    at.text_input[0].set_value("prod-db")
+    record = next(b for b in at.button if "Record claim" in (b.label or ""))
+    record.click().run()
+    assert not at.exception
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    claim = reloaded.claims()[0]
+    assert claim.observations == (obs.observation_id,)
+    assert claim.status == "SUPPORTED"
+    assert claim.subject == "prod-db"
+    assert "Production database was accessed" in _md(at)
+
+
+def test_claim_amendment_workflow(tmp_path: Path):
+    ws = _seed(tmp_path)
+    obs = ws.add_observation("CloudTrail shows database access", actor="alice@example.com")
+    claim = ws.add_claim("Database was accessed", actor="alice@example.com",
+                         observation_refs=[obs.observation_id])
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    _nav(at, "Claims")
+
+    at.text_area[1].set_value("Database was accessed from a suspicious IP")
+    at.text_input[0].set_value("Add source context")
+    correct = next(b for b in at.button if "Save claim correction" in (b.label or ""))
+    correct.click().run()
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    assert reloaded.effective_claim(claim.claim_id).current_text.endswith("suspicious IP")
+
+    at.selectbox[1].set_value("SUPPORTED")
+    at.text_area[2].set_value("Second analyst review completed")
+    status = next(b for b in at.button if (b.label or "") == "Save status")
+    status.click().run()
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    assert reloaded.effective_claim(claim.claim_id).current_status == "SUPPORTED"
+
+    at.text_area[3].set_value("Superseded by final analysis")
+    withdraw = next(b for b in at.button if "Withdraw claim" in (b.label or ""))
+    withdraw.click().run()
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    assert reloaded.effective_claim(claim.claim_id).current_status == "WITHDRAWN"
 
 
 def test_lifecycle_controls(tmp_path: Path):

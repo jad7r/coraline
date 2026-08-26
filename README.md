@@ -16,6 +16,16 @@ python -m interfaces.cli.coreline observe correct OBS-ABC123DEF456 \
   --text "Source IP was 10.0.0.6" --reason "Analyst typo"
 python -m interfaces.cli.coreline observe retract OBS-ABC123DEF456 \
   --reason "Duplicate observation"
+python -m interfaces.cli.coreline claim add \
+  --text "Production database was accessed from an unusual source IP" \
+  --observation OBS-ABC123DEF456 --status SUPPORTED
+python -m interfaces.cli.coreline claim correct CLM-ABC123DEF456 \
+  --text "Production database was accessed from 203.0.113.10" \
+  --reason "Add confirmed source IP"
+python -m interfaces.cli.coreline claim status CLM-ABC123DEF456 \
+  --status REFUTED --reason "Follow-up review disproved access"
+python -m interfaces.cli.coreline claim withdraw CLM-ABC123DEF456 \
+  --reason "Superseded by final analysis"
 python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -77,6 +87,18 @@ export CORELINE_ACTOR="$(whoami)"
   --text "Source IP was 10.0.0.6" --reason "Analyst typo"
 .venv/bin/python -m interfaces.cli.coreline observe retract OBS-ABC123DEF456 \
   --reason "Duplicate observation"
+.venv/bin/python -m interfaces.cli.coreline claim add \
+  --text "Production database was accessed from an unusual source IP" \
+  --observation OBS-ABC123DEF456 --status SUPPORTED
+.venv/bin/python -m interfaces.cli.coreline claim list
+.venv/bin/python -m interfaces.cli.coreline claim show CLM-ABC123DEF456
+.venv/bin/python -m interfaces.cli.coreline claim correct CLM-ABC123DEF456 \
+  --text "Production database was accessed from 203.0.113.10" \
+  --reason "Add confirmed source IP"
+.venv/bin/python -m interfaces.cli.coreline claim status CLM-ABC123DEF456 \
+  --status REFUTED --reason "Follow-up review disproved access"
+.venv/bin/python -m interfaces.cli.coreline claim withdraw CLM-ABC123DEF456 \
+  --reason "Superseded by final analysis"
 .venv/bin/python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 .venv/bin/python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 .venv/bin/python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -113,6 +135,13 @@ as evidence references. Corrections and retractions are append-only amendments: 
 original observation remains intact, and the amendment history is audited and included in
 the PIR.
 
+Claims are immutable investigative assertions derived from observations. A claim must
+reference at least one non-retracted observation from the same incident; claims cannot
+reference raw evidence hashes or filesystem paths directly. Corrections, status changes,
+and withdrawals are append-only amendments. Claim creation and amendments are audited, and
+verification fails if a claim or amendment is missing, tampered, or points at a missing
+observation.
+
 Trusted signer registry workflow:
 
 ```bash
@@ -136,7 +165,7 @@ Baseline test gate:
 Current local baseline at this checkpoint:
 
 ```text
-328 passed, 1 skipped, 17 warnings, 6 subtests passed
+346 passed, 1 skipped, 17 warnings, 6 subtests passed
 ```
 
 Scrub check for old project naming: search the working tree for the previous project name
