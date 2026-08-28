@@ -44,7 +44,7 @@ def test_incident_loading_and_navigation(tmp_path: Path):
     assert "Integrity verified" in blob
     assert at.radio[1].options == [
         "Overview", "Evidence", "Subjects", "Observations", "Claims",
-        "Actions", "Timeline", "Reports",
+        "Actions", "Decisions", "Timeline", "Reports",
     ]
 
     _nav(at, "Evidence")
@@ -57,6 +57,8 @@ def test_incident_loading_and_navigation(tmp_path: Path):
     assert "Claims" in _md(at)
     _nav(at, "Actions")
     assert "Actions" in _md(at)
+    _nav(at, "Decisions")
+    assert "Decisions" in _md(at)
     _nav(at, "Timeline")
     assert "AUDIT CHAIN VERIFIED" in _md(at)
 
@@ -281,6 +283,41 @@ def test_action_create_and_amendment_workflow(tmp_path: Path):
 
     reloaded = type(ws).load(ws.home, ws.incident_id)
     assert reloaded.effective_action(action.action_id).current_status == "CANCELLED"
+
+
+def test_decision_create_workflow(tmp_path: Path):
+    ws = _seed(tmp_path)
+    subject = ws.create_subject("HOST", "host-01", actor="alice@example.com")
+    obs = ws.add_observation("EDR shows malware execution", actor="alice@example.com",
+                             subject_refs=[subject.subject_id])
+    claim = ws.add_claim("Host was compromised", actor="alice@example.com",
+                         observation_refs=[obs.observation_id],
+                         subject_refs=[subject.subject_id])
+    action = ws.create_action("host-isolation", "Isolated host-01",
+                              actor="alice@example.com",
+                              claim_refs=[claim.claim_id],
+                              subject_refs=[subject.subject_id])
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    _nav(at, "Decisions")
+
+    at.text_input[0].set_value("authorize-recovery")
+    at.text_area[0].set_value("Authorize recovery for host-01")
+    at.text_area[1].set_value("Containment completed and evidence reviewed")
+    at.text_input[1].set_value("lead@example.com")
+    at.multiselect[0].set_value([subject.subject_id])
+    at.multiselect[2].set_value([obs.observation_id])
+    at.multiselect[3].set_value([claim.claim_id])
+    at.multiselect[4].set_value([action.action_id])
+    record = next(b for b in at.button if "Record decision" in (b.label or ""))
+    record.click().run()
+    assert not at.exception
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    decision = reloaded.decisions()[0]
+    assert decision.subjects == (subject.subject_id,)
+    assert decision.claims == (claim.claim_id,)
+    assert decision.actions == (action.action_id,)
 
 
 def test_lifecycle_controls(tmp_path: Path):

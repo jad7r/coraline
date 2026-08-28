@@ -21,7 +21,7 @@ def test_help_lists_all_commands():
     for cmd in (
         "declare", "doctor", "evidence", "timeline", "status", "report",
         "use", "close", "verify", "registry", "lifecycle", "observe", "claim",
-        "action", "subject",
+        "action", "subject", "decision",
     ):
         assert cmd in res.output
 
@@ -453,6 +453,162 @@ def test_action_create_list_show_and_amendment_flow(tmp_path: Path):
     assert "action-status-updated" in r.output
     assert "action-outcome-updated" in r.output
     assert "action-cancelled" in r.output
+
+
+def test_decision_create_list_show_and_amendment_flow(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "edr.log"
+    ev.write_text("host isolation telemetry\n", encoding="utf-8")
+
+    r = _run(["declare", "--title", "Host compromise", "--severity", "SEV1"], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["evidence", "add", "--file", str(ev), "--note", "EDR telemetry"], home)
+    assert r.exit_code == 0, r.output
+    iid = (home / "CURRENT").read_text(encoding="utf-8").strip()
+    manifest = json.loads((home / iid / "manifest.json").read_text(encoding="utf-8"))
+    sha = manifest["items"][0]["sha256"]
+
+    r = _run(["subject", "create", "--type", "HOST", "--value", "host-01"], home)
+    assert r.exit_code == 0, r.output
+    subject_id = next(part for part in r.output.split() if part.startswith("SUB-"))
+    r = _run(["observe", "add", "--text", "EDR shows malware execution",
+              "--evidence", sha[:16], "--subject-id", subject_id], home)
+    assert r.exit_code == 0, r.output
+    obs_id = next(part for part in r.output.split() if part.startswith("OBS-"))
+    r = _run(["claim", "add", "--text", "Host was compromised",
+              "--observation", obs_id, "--subject-id", subject_id], home)
+    assert r.exit_code == 0, r.output
+    claim_id = next(part for part in r.output.split() if part.startswith("CLM-"))
+    r = _run(["action", "create", "--type", "host-isolation",
+              "--description", "Isolated host-01", "--claim", claim_id,
+              "--subject-id", subject_id], home)
+    assert r.exit_code == 0, r.output
+    action_id = next(part for part in r.output.split() if part.startswith("ACT-"))
+
+    r = _run([
+        "decision", "create",
+        "--type", "authorize-recovery",
+        "--statement", "Authorize recovery for host-01",
+        "--rationale", "Containment completed and evidence reviewed",
+        "--decided-by", "lead@example.com",
+        "--subject-id", subject_id,
+        "--evidence", sha[:16],
+        "--observation", obs_id,
+        "--claim", claim_id,
+        "--action", action_id,
+        "--alternative", "Keep host isolated",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "DECISION" in r.output
+    decision_id = next(part for part in r.output.split() if part.startswith("DEC-"))
+
+    r = _run(["decision", "list"], home)
+    assert r.exit_code == 0, r.output
+    assert "1 decision(s)" in r.output
+
+    r = _run(["decision", "show", decision_id], home)
+    assert r.exit_code == 0, r.output
+    assert "authorize-recovery" in r.output
+    assert "Authorize recovery" in r.output
+    assert "lead@example.com" in r.output
+    assert claim_id in r.output
+
+    r = _run([
+        "decision", "amend", decision_id,
+        "--statement", "Authorize staged recovery for host-01",
+        "--reason", "Clarify scope",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "decision correction recorded" in r.output
+
+    r = _run([
+        "decision", "rationale", decision_id,
+        "--rationale", "Containment completed and EDR telemetry reviewed",
+        "--reason", "Add telemetry detail",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "decision rationale recorded" in r.output
+
+    r = _run([
+        "decision", "approve", decision_id,
+        "--approved-by", "director@example.com",
+        "--reason", "Recovery approved",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "decision approved" in r.output
+
+    r = _run(["decision", "show", decision_id], home)
+    assert r.exit_code == 0, r.output
+    assert "DECISION AMENDMENTS" in r.output
+    assert "director@example.com"[:12] in r.output
+
+    r = _run([
+        "decision", "create",
+        "--type", "notify",
+        "--statement", "Notify customer",
+        "--rationale", "Customer impact confirmed",
+        "--decided-by", "ai:assistant",
+    ], home)
+    assert r.exit_code == 1
+    assert "human authority" in r.output
+
+    r = _run(["timeline", "show"], home)
+    assert r.exit_code == 0, r.output
+    assert "decision-created" in r.output
+    assert "decision-approved" in r.output
+
+
+def test_decision_supersede_withdraw_and_reject_cli(tmp_path: Path):
+    home = tmp_path / "incidents"
+    r = _run(["declare", "--title", "Legal review", "--severity", "SEV3"], home)
+    assert r.exit_code == 0, r.output
+    first = _run([
+        "decision", "create",
+        "--type", "notify",
+        "--statement", "Notify customer now",
+        "--rationale", "Impact likely",
+        "--decided-by", "lead",
+    ], home)
+    second = _run([
+        "decision", "create",
+        "--type", "notify",
+        "--statement", "Delay notification",
+        "--rationale", "Legal review pending",
+        "--decided-by", "lead",
+    ], home)
+    assert first.exit_code == 0, first.output
+    assert second.exit_code == 0, second.output
+    first_id = next(part for part in first.output.split() if part.startswith("DEC-"))
+    second_id = next(part for part in second.output.split() if part.startswith("DEC-"))
+
+    r = _run(["decision", "supersede", first_id, "--by", second_id,
+              "--reason", "Legal requested delay"], home)
+    assert r.exit_code == 0, r.output
+    assert "decision superseded" in r.output
+
+    third = _run([
+        "decision", "create",
+        "--type", "closure",
+        "--statement", "Close incident",
+        "--rationale", "No impact found",
+        "--decided-by", "lead",
+    ], home)
+    third_id = next(part for part in third.output.split() if part.startswith("DEC-"))
+    r = _run(["decision", "withdraw", third_id, "--reason", "More evidence arrived"], home)
+    assert r.exit_code == 0, r.output
+    assert "decision withdrawn" in r.output
+
+    fourth = _run([
+        "decision", "create",
+        "--type", "notify",
+        "--statement", "Notify vendor",
+        "--rationale", "Potential vendor impact",
+        "--decided-by", "lead",
+    ], home)
+    fourth_id = next(part for part in fourth.output.split() if part.startswith("DEC-"))
+    r = _run(["decision", "reject", fourth_id, "--reason", "No vendor impact"], home)
+    assert r.exit_code == 0, r.output
+    assert "decision rejected" in r.output
 
 
 def test_lifecycle_contain_and_resolve_flow(tmp_path: Path):

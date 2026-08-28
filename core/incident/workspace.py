@@ -56,6 +56,10 @@ CLAIM_STATUSES = ("ASSERTED", "SUPPORTED", "REFUTED", "INCONCLUSIVE")
 CLAIM_AMENDMENT_TYPES = ("CORRECTION", "STATUS", "WITHDRAWAL")
 ACTION_STATUSES = ("PLANNED", "INITIATED", "COMPLETED", "FAILED", "CANCELLED")
 ACTION_AMENDMENT_TYPES = ("CORRECTION", "STATUS", "OUTCOME", "CANCELLATION")
+DECISION_STATUSES = ("PROPOSED", "APPROVED", "REJECTED", "SUPERSEDED", "WITHDRAWN")
+DECISION_AMENDMENT_TYPES = (
+    "CORRECTION", "STATUS", "RATIONALE", "APPROVAL", "SUPERSEDE", "WITHDRAWAL",
+)
 SUBJECT_TYPES = (
     "USER", "EMAIL", "IP_ADDRESS", "HOST", "DEVICE", "SERVICE", "APPLICATION",
     "CLOUD_ACCOUNT", "CREDENTIAL", "DOMAIN", "URL", "FILE", "MALWARE",
@@ -592,6 +596,164 @@ class EffectiveAction:
     cancellation: Optional[ActionAmendment] = None
 
 
+@dataclass(frozen=True)
+class Decision:
+    """One immutable human decision and rationale for an incident."""
+
+    decision_id: str
+    incident_id: str
+    decision_type: str
+    statement: str
+    rationale: str
+    decided_by: str
+    created_at: str
+    status: str = "PROPOSED"
+    approved_by: Optional[str] = None
+    alternatives_considered: Tuple[str, ...] = ()
+    subjects: Tuple[str, ...] = ()
+    evidence: Tuple[str, ...] = ()
+    observations: Tuple[str, ...] = ()
+    claims: Tuple[str, ...] = ()
+    actions: Tuple[str, ...] = ()
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "decision_id": self.decision_id,
+            "incident_id": self.incident_id,
+            "decision_type": self.decision_type,
+            "statement": self.statement,
+            "rationale": self.rationale,
+            "decided_by": self.decided_by,
+            "created_at": self.created_at,
+            "status": self.status,
+            "alternatives_considered": list(self.alternatives_considered),
+            "subjects": list(self.subjects),
+            "evidence": list(self.evidence),
+            "observations": list(self.observations),
+            "claims": list(self.claims),
+            "actions": list(self.actions),
+        }
+        if self.approved_by:
+            d["approved_by"] = self.approved_by
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Decision":
+        return cls(
+            decision_id=str(d["decision_id"]),
+            incident_id=str(d["incident_id"]),
+            decision_type=str(d["decision_type"]),
+            statement=str(d["statement"]),
+            rationale=str(d["rationale"]),
+            decided_by=str(d["decided_by"]),
+            created_at=str(d["created_at"]),
+            status=str(d.get("status", "PROPOSED")).upper(),
+            approved_by=str(d["approved_by"]) if d.get("approved_by") else None,
+            alternatives_considered=tuple(str(a) for a in d.get("alternatives_considered", [])),
+            subjects=tuple(str(s) for s in d.get("subjects", [])),
+            evidence=tuple(str(e).lower() for e in d.get("evidence", [])),
+            observations=tuple(str(o) for o in d.get("observations", [])),
+            claims=tuple(str(c) for c in d.get("claims", [])),
+            actions=tuple(str(a) for a in d.get("actions", [])),
+        )
+
+    def statement_hash(self) -> str:
+        return sha256_bytes(self.statement.encode("utf-8"))
+
+    def rationale_hash(self) -> str:
+        return sha256_bytes(self.rationale.encode("utf-8"))
+
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class DecisionAmendment:
+    """Append-only correction, status, rationale, approval, or withdrawal."""
+
+    amendment_id: str
+    decision_id: str
+    incident_id: str
+    amendment_type: str
+    created_at: str
+    actor: str
+    text: str
+    status: Optional[str] = None
+    rationale: Optional[str] = None
+    approved_by: Optional[str] = None
+    supersedes: Optional[str] = None
+    reason: Optional[str] = None
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "amendment_id": self.amendment_id,
+            "decision_id": self.decision_id,
+            "incident_id": self.incident_id,
+            "amendment_type": self.amendment_type,
+            "created_at": self.created_at,
+            "actor": self.actor,
+            "text": self.text,
+        }
+        if self.status:
+            d["status"] = self.status
+        if self.rationale:
+            d["rationale"] = self.rationale
+        if self.approved_by:
+            d["approved_by"] = self.approved_by
+        if self.supersedes:
+            d["supersedes"] = self.supersedes
+        if self.reason:
+            d["reason"] = self.reason
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "DecisionAmendment":
+        return cls(
+            amendment_id=str(d["amendment_id"]),
+            decision_id=str(d["decision_id"]),
+            incident_id=str(d["incident_id"]),
+            amendment_type=str(d["amendment_type"]).upper(),
+            created_at=str(d["created_at"]),
+            actor=str(d["actor"]),
+            text=str(d["text"]),
+            status=str(d["status"]).upper() if d.get("status") else None,
+            rationale=str(d["rationale"]) if d.get("rationale") else None,
+            approved_by=str(d["approved_by"]) if d.get("approved_by") else None,
+            supersedes=str(d["supersedes"]) if d.get("supersedes") else None,
+            reason=str(d["reason"]) if d.get("reason") else None,
+        )
+
+    def text_hash(self) -> str:
+        return sha256_bytes(self.text.encode("utf-8"))
+
+    def rationale_hash(self) -> Optional[str]:
+        return sha256_bytes(self.rationale.encode("utf-8")) if self.rationale else None
+
+    def reason_hash(self) -> Optional[str]:
+        return sha256_bytes(self.reason.encode("utf-8")) if self.reason else None
+
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
+
+@dataclass(frozen=True)
+class EffectiveDecision:
+    """Deterministic current view of an immutable decision plus amendments."""
+
+    decision: Decision
+    amendments: Tuple[DecisionAmendment, ...]
+    current_status: str
+    current_statement: str
+    current_rationale: str
+    current_approved_by: Optional[str] = None
+    latest_correction: Optional[DecisionAmendment] = None
+    latest_rationale: Optional[DecisionAmendment] = None
+    latest_status: Optional[DecisionAmendment] = None
+    approval: Optional[DecisionAmendment] = None
+    supersession: Optional[DecisionAmendment] = None
+    withdrawal: Optional[DecisionAmendment] = None
+
+
 # ---- the workspace ----------------------------------------------------------- #
 
 @dataclass
@@ -635,6 +797,10 @@ class IncidentWorkspace:
     @property
     def _subjects_path(self) -> Path:
         return self.dir / "subjects.json"
+
+    @property
+    def _decisions_path(self) -> Path:
+        return self.dir / "decisions.json"
 
     @property
     def _sig_path(self) -> Path:
@@ -2881,6 +3047,805 @@ class IncidentWorkspace:
                 errors.append(f"{amendment_id}: audit event hash mismatch")
         return not errors, errors
 
+    # -- decisions ------------------------------------------------------------ #
+    def _load_decision_store(self) -> Tuple[List[Decision], List[DecisionAmendment]]:
+        if not self._decisions_path.exists():
+            return [], []
+        data = json.loads(self._decisions_path.read_text(encoding="utf-8"))
+        decisions = [Decision.from_dict(d) for d in data.get("decisions", [])]
+        amendments = [
+            DecisionAmendment.from_dict(d)
+            for d in data.get("amendments", [])
+        ]
+        return (
+            sorted(decisions, key=lambda d: (d.created_at, d.decision_id)),
+            sorted(amendments, key=lambda a: (a.created_at, a.amendment_id)),
+        )
+
+    def _load_decisions(self) -> List[Decision]:
+        decisions, _ = self._load_decision_store()
+        return decisions
+
+    def _load_decision_amendments(self) -> List[DecisionAmendment]:
+        _, amendments = self._load_decision_store()
+        return amendments
+
+    def _save_decision_store(
+        self,
+        decisions: List[Decision],
+        amendments: List[DecisionAmendment],
+    ) -> None:
+        ordered = sorted(decisions, key=lambda d: (d.created_at, d.decision_id))
+        ordered_amendments = sorted(amendments, key=lambda a: (a.created_at, a.amendment_id))
+        payload = {
+            "version": "1",
+            "incident_id": self.incident_id,
+            "decisions": [d.to_dict() for d in ordered],
+            "amendments": [a.to_dict() for a in ordered_amendments],
+        }
+        self._write_text_atomic(
+            self._decisions_path,
+            json.dumps(payload, indent=2, sort_keys=True),
+        )
+
+    def _save_decisions(self, decisions: List[Decision]) -> None:
+        _, amendments = self._load_decision_store()
+        self._save_decision_store(decisions, amendments)
+
+    def _save_decision_amendments(self, amendments: List[DecisionAmendment]) -> None:
+        decisions, _ = self._load_decision_store()
+        self._save_decision_store(decisions, amendments)
+
+    def decisions(self) -> List[Decision]:
+        return self._load_decisions()
+
+    def list_decisions(self) -> List[Decision]:
+        return self.decisions()
+
+    def decision_amendments(self, decision_id: Optional[str] = None) -> List[DecisionAmendment]:
+        amendments = self._load_decision_amendments()
+        if decision_id:
+            amendments = [a for a in amendments if a.decision_id == decision_id]
+        return amendments
+
+    def decision(self, decision_id: str) -> Decision:
+        for decision in self._load_decisions():
+            if decision.decision_id == decision_id:
+                return decision
+        raise WorkspaceError(f"decision not found: {decision_id}")
+
+    def get_decision(self, decision_id: str) -> Decision:
+        return self.decision(decision_id)
+
+    def _validate_decision_authority(self, value: str, field_name: str) -> str:
+        clean = value.strip()
+        if not clean:
+            raise WorkspaceError(f"{field_name} must not be empty")
+        lowered = clean.lower()
+        if lowered in {"ai", "llm", "assistant"} or lowered.startswith(
+            ("ai:", "llm:", "assistant:", "model:", "openai:")
+        ):
+            raise WorkspaceError(f"{field_name} must be a human authority, not AI")
+        return clean
+
+    def _resolve_decision_observation_refs(self, refs: Optional[List[str]]) -> Tuple[str, ...]:
+        return tuple(sorted({self._resolve_observation_ref(ref) for ref in (refs or [])}))
+
+    def _resolve_decision_claim_refs(self, refs: Optional[List[str]]) -> Tuple[str, ...]:
+        return self._resolve_action_claim_refs(refs)
+
+    def _resolve_decision_action_refs(self, refs: Optional[List[str]]) -> Tuple[str, ...]:
+        resolved = []
+        for ref in refs or []:
+            value = ref.strip()
+            if not value:
+                raise WorkspaceError("action reference must not be empty")
+            if "/" in value or "\\" in value:
+                raise WorkspaceError(f"invalid action reference: {ref}")
+            self.action(value)
+            resolved.append(value)
+        return tuple(sorted(set(resolved)))
+
+    def _resolve_decision_evidence_refs(self, refs: Optional[List[str]]) -> Tuple[str, ...]:
+        return tuple(sorted({self._resolve_evidence_ref(ref) for ref in (refs or [])}))
+
+    def decision_is_terminal(self, decision_id: str) -> bool:
+        effective = self.effective_decision(decision_id)
+        return effective.current_status in ("REJECTED", "SUPERSEDED", "WITHDRAWN")
+
+    def effective_decision(self, decision_id: str) -> EffectiveDecision:
+        decision = self.decision(decision_id)
+        amendments = tuple(self.decision_amendments(decision_id))
+        latest_correction: Optional[DecisionAmendment] = None
+        latest_rationale: Optional[DecisionAmendment] = None
+        latest_status: Optional[DecisionAmendment] = None
+        approval: Optional[DecisionAmendment] = None
+        supersession: Optional[DecisionAmendment] = None
+        withdrawal: Optional[DecisionAmendment] = None
+        for amendment in amendments:
+            if supersession or withdrawal:
+                continue
+            if amendment.amendment_type == "SUPERSEDE":
+                supersession = amendment
+            elif amendment.amendment_type == "WITHDRAWAL":
+                withdrawal = amendment
+            elif amendment.amendment_type == "CORRECTION":
+                latest_correction = amendment
+            elif amendment.amendment_type == "RATIONALE":
+                latest_rationale = amendment
+            elif amendment.amendment_type == "APPROVAL":
+                approval = amendment
+                latest_status = amendment
+            elif amendment.amendment_type == "STATUS":
+                latest_status = amendment
+        current_status = decision.status
+        if supersession:
+            current_status = "SUPERSEDED"
+        elif withdrawal:
+            current_status = "WITHDRAWN"
+        elif latest_status and latest_status.status:
+            current_status = latest_status.status
+        current_statement = latest_correction.text if latest_correction else decision.statement
+        current_rationale = (
+            latest_rationale.rationale if latest_rationale and latest_rationale.rationale
+            else decision.rationale
+        )
+        current_approved_by = (
+            approval.approved_by if approval and approval.approved_by else decision.approved_by
+        )
+        return EffectiveDecision(
+            decision=decision,
+            amendments=amendments,
+            current_status=current_status,
+            current_statement=current_statement,
+            current_rationale=current_rationale,
+            current_approved_by=current_approved_by,
+            latest_correction=latest_correction,
+            latest_rationale=latest_rationale,
+            latest_status=latest_status,
+            approval=approval,
+            supersession=supersession,
+            withdrawal=withdrawal,
+        )
+
+    @locked_mutation
+    def create_decision(
+        self,
+        decision_type: str,
+        statement: str,
+        rationale: str,
+        decided_by: str,
+        actor: str,
+        status: str = "PROPOSED",
+        approved_by: Optional[str] = None,
+        alternatives_considered: Optional[List[str]] = None,
+        subject_refs: Optional[List[str]] = None,
+        evidence_refs: Optional[List[str]] = None,
+        observation_refs: Optional[List[str]] = None,
+        claim_refs: Optional[List[str]] = None,
+        action_refs: Optional[List[str]] = None,
+        when: Optional[datetime] = None,
+    ) -> Decision:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "decisions are locked"
+            )
+        clean_type = decision_type.strip()
+        if not clean_type:
+            raise WorkspaceError("decision type must not be empty")
+        clean_statement = statement.strip()
+        if not clean_statement:
+            raise WorkspaceError("decision statement must not be empty")
+        clean_rationale = rationale.strip()
+        if not clean_rationale:
+            raise WorkspaceError("decision rationale must not be empty")
+        status = status.upper()
+        if status not in DECISION_STATUSES:
+            raise WorkspaceError(
+                f"invalid decision status {status!r}; choose one of {', '.join(DECISION_STATUSES)}"
+            )
+        clean_decided_by = self._validate_decision_authority(decided_by, "decided_by")
+        clean_approved_by = (
+            self._validate_decision_authority(approved_by, "approved_by")
+            if approved_by else None
+        )
+        if clean_approved_by and status != "APPROVED":
+            raise WorkspaceError("approved_by requires APPROVED status")
+        if status == "APPROVED" and not clean_approved_by:
+            raise WorkspaceError("APPROVED decisions require approved_by")
+        alternatives = tuple(
+            alt.strip() for alt in (alternatives_considered or []) if alt.strip()
+        )
+        subjects = self._resolve_subject_refs(subject_refs)
+        evidence = self._resolve_decision_evidence_refs(evidence_refs)
+        observations = self._resolve_decision_observation_refs(observation_refs)
+        claims = self._resolve_decision_claim_refs(claim_refs)
+        actions = self._resolve_decision_action_refs(action_refs)
+        when = when or _now()
+        decision = Decision(
+            decision_id=f"DEC-{uuid.uuid4().hex[:12].upper()}",
+            incident_id=self.incident_id,
+            decision_type=clean_type,
+            statement=clean_statement,
+            rationale=clean_rationale,
+            decided_by=clean_decided_by,
+            created_at=to_iso(when),
+            status=status,
+            approved_by=clean_approved_by,
+            alternatives_considered=alternatives,
+            subjects=subjects,
+            evidence=evidence,
+            observations=observations,
+            claims=claims,
+            actions=actions,
+        )
+        existing = self._load_decisions()
+        if any(d.decision_id == decision.decision_id for d in existing):
+            raise WorkspaceError(f"duplicate decision id generated: {decision.decision_id}")
+        self._save_decisions(existing + [decision])
+        self.state["decision_count"] = len(existing) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "decision-created",
+            {
+                "decision_id": decision.decision_id,
+                "incident_id": self.incident_id,
+                "decision_type": decision.decision_type,
+                "created_at": decision.created_at,
+                "decided_by": decision.decided_by,
+                "status": decision.status,
+                "approved_by": decision.approved_by,
+                "subjects": list(decision.subjects),
+                "evidence": list(decision.evidence),
+                "observations": list(decision.observations),
+                "claims": list(decision.claims),
+                "actions": list(decision.actions),
+                "record_hash": decision.record_hash(),
+                "statement_hash": decision.statement_hash(),
+                "rationale_hash": decision.rationale_hash(),
+            },
+            when,
+        )
+        return decision
+
+    def _new_decision_amendment(
+        self,
+        decision_id: str,
+        amendment_type: str,
+        text: str,
+        actor: str,
+        when: datetime,
+        status: Optional[str] = None,
+        rationale: Optional[str] = None,
+        approved_by: Optional[str] = None,
+        supersedes: Optional[str] = None,
+        reason: Optional[str] = None,
+    ) -> DecisionAmendment:
+        amendment = DecisionAmendment(
+            amendment_id=f"DAM-{uuid.uuid4().hex[:12].upper()}",
+            decision_id=decision_id,
+            incident_id=self.incident_id,
+            amendment_type=amendment_type,
+            created_at=to_iso(when),
+            actor=actor,
+            text=text,
+            status=status,
+            rationale=rationale,
+            approved_by=approved_by,
+            supersedes=supersedes,
+            reason=reason,
+        )
+        amendments = self._load_decision_amendments()
+        if any(a.amendment_id == amendment.amendment_id for a in amendments):
+            raise WorkspaceError(f"duplicate decision amendment id generated: {amendment.amendment_id}")
+        self._save_decision_amendments(amendments + [amendment])
+        self.state["decision_amendment_count"] = len(amendments) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        return amendment
+
+    @locked_mutation
+    def amend_decision(
+        self,
+        decision_id: str,
+        correction: str,
+        actor: str,
+        reason: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> DecisionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "decisions are locked"
+            )
+        self.decision(decision_id)
+        if self.decision_is_terminal(decision_id):
+            raise WorkspaceError(f"decision {decision_id} is terminal")
+        clean = correction.strip()
+        if not clean:
+            raise WorkspaceError("decision correction text must not be empty")
+        reason_text = reason.strip() if reason and reason.strip() else None
+        when = when or _now()
+        amendment = self._new_decision_amendment(
+            decision_id, "CORRECTION", clean, actor, when, reason=reason_text
+        )
+        self._append_audit(
+            actor,
+            "decision-corrected",
+            {
+                "amendment_id": amendment.amendment_id,
+                "decision_id": decision_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "record_hash": amendment.record_hash(),
+                "text_hash": amendment.text_hash(),
+                "reason_hash": amendment.reason_hash(),
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def update_decision_rationale(
+        self,
+        decision_id: str,
+        rationale: str,
+        actor: str,
+        reason: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> DecisionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "decisions are locked"
+            )
+        self.decision(decision_id)
+        if self.decision_is_terminal(decision_id):
+            raise WorkspaceError(f"decision {decision_id} is terminal")
+        clean = rationale.strip()
+        if not clean:
+            raise WorkspaceError("decision rationale must not be empty")
+        reason_text = reason.strip() if reason and reason.strip() else None
+        when = when or _now()
+        amendment = self._new_decision_amendment(
+            decision_id,
+            "RATIONALE",
+            clean,
+            actor,
+            when,
+            rationale=clean,
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "decision-rationale-updated",
+            {
+                "amendment_id": amendment.amendment_id,
+                "decision_id": decision_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "record_hash": amendment.record_hash(),
+                "rationale_hash": amendment.rationale_hash(),
+                "reason_hash": amendment.reason_hash(),
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def approve_decision(
+        self,
+        decision_id: str,
+        approved_by: str,
+        actor: str,
+        reason: str,
+        when: Optional[datetime] = None,
+    ) -> DecisionAmendment:
+        return self._update_decision_status(
+            decision_id, "APPROVED", actor, reason, approved_by=approved_by, when=when
+        )
+
+    @locked_mutation
+    def reject_decision(
+        self,
+        decision_id: str,
+        actor: str,
+        reason: str,
+        when: Optional[datetime] = None,
+    ) -> DecisionAmendment:
+        return self._update_decision_status(decision_id, "REJECTED", actor, reason, when=when)
+
+    def _update_decision_status(
+        self,
+        decision_id: str,
+        status: str,
+        actor: str,
+        reason: str,
+        approved_by: Optional[str] = None,
+        when: Optional[datetime] = None,
+    ) -> DecisionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "decisions are locked"
+            )
+        effective = self.effective_decision(decision_id)
+        if effective.current_status != "PROPOSED":
+            raise WorkspaceError(
+                f"cannot move decision from {effective.current_status} to {status}"
+            )
+        reason_text = reason.strip()
+        if not reason_text:
+            raise WorkspaceError("decision status reason must not be empty")
+        clean_approved_by = None
+        if status == "APPROVED":
+            if not approved_by:
+                raise WorkspaceError("approved decisions require approved_by")
+            clean_approved_by = self._validate_decision_authority(approved_by, "approved_by")
+            amendment_type = "APPROVAL"
+            action = "decision-approved"
+        elif status == "REJECTED":
+            amendment_type = "STATUS"
+            action = "decision-rejected"
+        else:
+            raise WorkspaceError(f"invalid decision status update: {status}")
+        when = when or _now()
+        amendment = self._new_decision_amendment(
+            decision_id,
+            amendment_type,
+            reason_text,
+            actor,
+            when,
+            status=status,
+            approved_by=clean_approved_by,
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            action,
+            {
+                "amendment_id": amendment.amendment_id,
+                "decision_id": decision_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "status": amendment.status,
+                "approved_by": amendment.approved_by,
+                "record_hash": amendment.record_hash(),
+                "reason_hash": amendment.reason_hash(),
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def supersede_decision(
+        self,
+        decision_id: str,
+        superseded_by: str,
+        actor: str,
+        reason: str,
+        when: Optional[datetime] = None,
+    ) -> DecisionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "decisions are locked"
+            )
+        if decision_id == superseded_by:
+            raise WorkspaceError("decision cannot supersede itself")
+        effective = self.effective_decision(decision_id)
+        if effective.current_status not in ("PROPOSED", "APPROVED"):
+            raise WorkspaceError(f"decision {decision_id} is terminal")
+        self.decision(superseded_by)
+        reason_text = reason.strip()
+        if not reason_text:
+            raise WorkspaceError("decision supersession reason must not be empty")
+        when = when or _now()
+        amendment = self._new_decision_amendment(
+            decision_id,
+            "SUPERSEDE",
+            reason_text,
+            actor,
+            when,
+            status="SUPERSEDED",
+            supersedes=superseded_by,
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "decision-superseded",
+            {
+                "amendment_id": amendment.amendment_id,
+                "decision_id": decision_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "status": amendment.status,
+                "supersedes": amendment.supersedes,
+                "record_hash": amendment.record_hash(),
+                "reason_hash": amendment.reason_hash(),
+            },
+            when,
+        )
+        return amendment
+
+    @locked_mutation
+    def withdraw_decision(
+        self,
+        decision_id: str,
+        actor: str,
+        reason: str,
+        when: Optional[datetime] = None,
+    ) -> DecisionAmendment:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "decisions are locked"
+            )
+        effective = self.effective_decision(decision_id)
+        if effective.current_status not in ("PROPOSED", "APPROVED"):
+            raise WorkspaceError(f"decision {decision_id} is terminal")
+        reason_text = reason.strip()
+        if not reason_text:
+            raise WorkspaceError("decision withdrawal reason must not be empty")
+        when = when or _now()
+        amendment = self._new_decision_amendment(
+            decision_id,
+            "WITHDRAWAL",
+            reason_text,
+            actor,
+            when,
+            status="WITHDRAWN",
+            reason=reason_text,
+        )
+        self._append_audit(
+            actor,
+            "decision-withdrawn",
+            {
+                "amendment_id": amendment.amendment_id,
+                "decision_id": decision_id,
+                "incident_id": self.incident_id,
+                "amendment_type": amendment.amendment_type,
+                "created_at": amendment.created_at,
+                "actor": amendment.actor,
+                "status": amendment.status,
+                "record_hash": amendment.record_hash(),
+                "reason_hash": amendment.reason_hash(),
+            },
+            when,
+        )
+        return amendment
+
+    def verify_decisions(self) -> Tuple[bool, List[str]]:
+        errors: List[str] = []
+        try:
+            decisions, amendments = self._load_decision_store()
+            subject_ids = {subject.subject_id for subject in self._load_subjects()}
+            observation_ids = {obs.observation_id for obs in self._load_observations()}
+            claim_ids = {claim.claim_id for claim in self._load_claims()}
+            action_ids = {action.action_id for action in self._load_actions()}
+            evidence_shas = self.evidence_shas()
+        except Exception as exc:
+            return False, [f"references unreadable for decision verification: {exc}"]
+        audits = self._load_audit()
+        decision_events = [
+            e for e in audits
+            if e.action == "decision-created"
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        amendment_events = [
+            e for e in audits
+            if e.action in (
+                "decision-approved",
+                "decision-rejected",
+                "decision-corrected",
+                "decision-rationale-updated",
+                "decision-superseded",
+                "decision-withdrawn",
+            )
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        decisions_by_id = {decision.decision_id: decision for decision in decisions}
+        amendments_by_id = {amendment.amendment_id: amendment for amendment in amendments}
+        seen = set()
+        for decision in decisions:
+            if decision.decision_id in seen:
+                errors.append(f"{decision.decision_id}: duplicate decision id")
+            seen.add(decision.decision_id)
+            if decision.incident_id != self.incident_id:
+                errors.append(f"{decision.decision_id}: incident id mismatch")
+            if not decision.decision_type.strip():
+                errors.append(f"{decision.decision_id}: empty decision type")
+            if not decision.statement.strip():
+                errors.append(f"{decision.decision_id}: empty decision statement")
+            if not decision.rationale.strip():
+                errors.append(f"{decision.decision_id}: empty decision rationale")
+            if decision.status not in DECISION_STATUSES:
+                errors.append(f"{decision.decision_id}: invalid decision status")
+            try:
+                self._validate_decision_authority(decision.decided_by, "decided_by")
+                if decision.approved_by:
+                    self._validate_decision_authority(decision.approved_by, "approved_by")
+            except WorkspaceError as exc:
+                errors.append(f"{decision.decision_id}: {exc}")
+            if decision.status == "APPROVED" and not decision.approved_by:
+                errors.append(f"{decision.decision_id}: approved decision missing approver")
+            for subject_id in decision.subjects:
+                if subject_id not in subject_ids:
+                    errors.append(f"{decision.decision_id}: missing subject {subject_id}")
+            for evidence in decision.evidence:
+                if evidence not in evidence_shas:
+                    errors.append(f"{decision.decision_id}: missing evidence {evidence}")
+            for observation_id in decision.observations:
+                if observation_id not in observation_ids:
+                    errors.append(f"{decision.decision_id}: missing observation {observation_id}")
+            for claim_id in decision.claims:
+                if claim_id not in claim_ids:
+                    errors.append(f"{decision.decision_id}: missing claim {claim_id}")
+            for action_id in decision.actions:
+                if action_id not in action_ids:
+                    errors.append(f"{decision.decision_id}: missing action {action_id}")
+            matching_audit = any(
+                e.action == "decision-created"
+                and e.detail.get("decision_id") == decision.decision_id
+                and e.detail.get("incident_id") == self.incident_id
+                and e.timestamp == decision.created_at
+                and e.detail.get("decision_type") == decision.decision_type
+                and e.detail.get("decided_by") == decision.decided_by
+                and e.detail.get("created_at") == decision.created_at
+                and e.detail.get("status") == decision.status
+                and e.detail.get("approved_by") == decision.approved_by
+                and sorted(e.detail.get("subjects", [])) == list(decision.subjects)
+                and sorted(e.detail.get("evidence", [])) == list(decision.evidence)
+                and sorted(e.detail.get("observations", [])) == list(decision.observations)
+                and sorted(e.detail.get("claims", [])) == list(decision.claims)
+                and sorted(e.detail.get("actions", [])) == list(decision.actions)
+                and e.detail.get("record_hash") == decision.record_hash()
+                and e.detail.get("statement_hash") == decision.statement_hash()
+                and e.detail.get("rationale_hash") == decision.rationale_hash()
+                for e in decision_events
+            )
+            if not matching_audit:
+                errors.append(f"{decision.decision_id}: missing matching audit event")
+        for event in decision_events:
+            decision_id = event.detail.get("decision_id")
+            decision = decisions_by_id.get(decision_id)
+            if decision is None:
+                errors.append(f"{decision_id}: audit event has no decision record")
+            elif event.detail.get("record_hash") != decision.record_hash():
+                errors.append(f"{decision_id}: audit event hash mismatch")
+
+        decision_ids = {decision.decision_id for decision in decisions}
+        terminal = {d.decision_id for d in decisions if d.status in ("REJECTED", "SUPERSEDED", "WITHDRAWN")}
+        amendment_ids = set()
+        for amendment in amendments:
+            if amendment.amendment_id in amendment_ids:
+                errors.append(f"{amendment.amendment_id}: duplicate decision amendment id")
+            amendment_ids.add(amendment.amendment_id)
+            if amendment.incident_id != self.incident_id:
+                errors.append(f"{amendment.amendment_id}: incident id mismatch")
+            if amendment.decision_id not in decision_ids:
+                errors.append(f"{amendment.amendment_id}: missing decision {amendment.decision_id}")
+            if amendment.amendment_type not in DECISION_AMENDMENT_TYPES:
+                errors.append(f"{amendment.amendment_id}: invalid amendment type")
+            if not amendment.text.strip():
+                errors.append(f"{amendment.amendment_id}: empty amendment text")
+            matching_audit = False
+            if amendment.decision_id in terminal:
+                errors.append(f"{amendment.amendment_id}: amendment after terminal decision")
+            if amendment.amendment_type == "CORRECTION":
+                if amendment.status or amendment.rationale or amendment.approved_by or amendment.supersedes:
+                    errors.append(f"{amendment.amendment_id}: invalid correction fields")
+                matching_audit = any(
+                    e.action == "decision-corrected"
+                    and self._decision_amendment_audit_matches(e, amendment)
+                    and e.detail.get("text_hash") == amendment.text_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            elif amendment.amendment_type == "RATIONALE":
+                if not amendment.rationale:
+                    errors.append(f"{amendment.amendment_id}: rationale missing")
+                matching_audit = any(
+                    e.action == "decision-rationale-updated"
+                    and self._decision_amendment_audit_matches(e, amendment)
+                    and e.detail.get("rationale_hash") == amendment.rationale_hash()
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            elif amendment.amendment_type == "APPROVAL":
+                if amendment.status != "APPROVED" or not amendment.approved_by:
+                    errors.append(f"{amendment.amendment_id}: invalid approval")
+                try:
+                    if amendment.approved_by:
+                        self._validate_decision_authority(amendment.approved_by, "approved_by")
+                except WorkspaceError as exc:
+                    errors.append(f"{amendment.amendment_id}: {exc}")
+                matching_audit = any(
+                    e.action == "decision-approved"
+                    and self._decision_amendment_audit_matches(e, amendment)
+                    and e.detail.get("status") == amendment.status
+                    and e.detail.get("approved_by") == amendment.approved_by
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            elif amendment.amendment_type == "STATUS":
+                if amendment.status != "REJECTED":
+                    errors.append(f"{amendment.amendment_id}: invalid status amendment")
+                matching_audit = any(
+                    e.action == "decision-rejected"
+                    and self._decision_amendment_audit_matches(e, amendment)
+                    and e.detail.get("status") == amendment.status
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            elif amendment.amendment_type == "SUPERSEDE":
+                if amendment.status != "SUPERSEDED" or not amendment.supersedes:
+                    errors.append(f"{amendment.amendment_id}: invalid supersession")
+                if amendment.supersedes == amendment.decision_id:
+                    errors.append(f"{amendment.amendment_id}: self-supersession")
+                if amendment.supersedes and amendment.supersedes not in decision_ids:
+                    errors.append(f"{amendment.amendment_id}: missing superseding decision {amendment.supersedes}")
+                matching_audit = any(
+                    e.action == "decision-superseded"
+                    and self._decision_amendment_audit_matches(e, amendment)
+                    and e.detail.get("status") == amendment.status
+                    and e.detail.get("supersedes") == amendment.supersedes
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            elif amendment.amendment_type == "WITHDRAWAL":
+                if amendment.status != "WITHDRAWN":
+                    errors.append(f"{amendment.amendment_id}: invalid withdrawal")
+                matching_audit = any(
+                    e.action == "decision-withdrawn"
+                    and self._decision_amendment_audit_matches(e, amendment)
+                    and e.detail.get("status") == amendment.status
+                    and e.detail.get("reason_hash") == amendment.reason_hash()
+                    for e in amendment_events
+                )
+            if amendment.status in ("REJECTED", "SUPERSEDED", "WITHDRAWN"):
+                if amendment.decision_id in terminal:
+                    errors.append(f"{amendment.amendment_id}: duplicate terminal amendment")
+                terminal.add(amendment.decision_id)
+            if not matching_audit:
+                errors.append(f"{amendment.amendment_id}: missing matching audit event")
+        for event in amendment_events:
+            amendment_id = event.detail.get("amendment_id")
+            amendment = amendments_by_id.get(amendment_id)
+            if amendment is None:
+                errors.append(f"{amendment_id}: audit event has no decision amendment record")
+            elif event.detail.get("record_hash") != amendment.record_hash():
+                errors.append(f"{amendment_id}: audit event hash mismatch")
+        return not errors, errors
+
+    def _decision_amendment_audit_matches(
+        self,
+        event: AuditEntry,
+        amendment: DecisionAmendment,
+    ) -> bool:
+        return (
+            event.detail.get("amendment_id") == amendment.amendment_id
+            and event.detail.get("decision_id") == amendment.decision_id
+            and event.detail.get("incident_id") == self.incident_id
+            and event.actor == amendment.actor
+            and event.timestamp == amendment.created_at
+            and event.detail.get("amendment_type") == amendment.amendment_type
+            and event.detail.get("actor") == amendment.actor
+            and event.detail.get("created_at") == amendment.created_at
+            and event.detail.get("record_hash") == amendment.record_hash()
+        )
+
     # -- evidence + manifest --------------------------------------------------- #
     def _load_manifest(self) -> EvidenceManifest:
         if self._manifest_path.exists():
@@ -2983,6 +3948,8 @@ class IncidentWorkspace:
             "claim_errors": [],
             "actions": True,
             "action_errors": [],
+            "decisions": True,
+            "decision_errors": [],
         }
         manifest = None
         if self._manifest_path.exists() and self._sig_path.exists():
@@ -3024,6 +3991,9 @@ class IncidentWorkspace:
         actions_ok, action_errors = self.verify_actions()
         result["actions"] = actions_ok
         result["action_errors"] = action_errors
+        decisions_ok, decision_errors = self.verify_decisions()
+        result["decisions"] = decisions_ok
+        result["decision_errors"] = decision_errors
         return result
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
@@ -3098,6 +4068,9 @@ class IncidentWorkspace:
             Gate("actions", "Actions reference valid investigation records", v["actions"],
                  "verified" if v["actions"]
                  else f"{len(v['action_errors'])} issue(s)"),
+            Gate("decisions", "Decisions reference valid investigation records", v["decisions"],
+                 "verified" if v["decisions"]
+                 else f"{len(v['decision_errors'])} issue(s)"),
             Gate("report", "PIR generated", report_exists,
                  "present" if report_exists else "not yet generated"),
         ]
@@ -3285,6 +4258,56 @@ class IncidentWorkspace:
                 lines.append(
                     f"| {amendment.amendment_id} | {amendment.action_id} | "
                     f"{amendment.amendment_type} | {status} | {text} | {outcome} | {reason} |"
+                )
+            lines.append("")
+        lines.append("## Decisions")
+        lines.append("")
+        decisions = self.decisions()
+        if decisions:
+            lines.append(
+                "| ID | Type | Current status | Decision maker | Approver | "
+                "Subjects | Evidence | Observations | Claims | Actions | Statement | Rationale |"
+            )
+            lines.append(
+                "|----|------|----------------|----------------|----------|----------|----------|"
+                "--------------|--------|---------|-----------|-----------|"
+            )
+            for decision in decisions:
+                effective = self.effective_decision(decision.decision_id)
+                subjects = ", ".join(decision.subjects) or "-"
+                evidence = ", ".join(sha[:16] for sha in decision.evidence) or "-"
+                observations = ", ".join(decision.observations) or "-"
+                claims = ", ".join(decision.claims) or "-"
+                actions = ", ".join(decision.actions) or "-"
+                statement = effective.current_statement.replace("|", "\\|").replace("\n", " ")
+                rationale = effective.current_rationale.replace("|", "\\|").replace("\n", " ")
+                approver = effective.current_approved_by or "-"
+                lines.append(
+                    f"| {decision.decision_id} | {decision.decision_type} | "
+                    f"{effective.current_status} | {decision.decided_by} | {approver} | "
+                    f"{subjects} | `{evidence}` | {observations} | {claims} | {actions} | "
+                    f"{statement} | {rationale} |"
+                )
+        else:
+            lines.append("_No decisions recorded._")
+        lines.append("")
+        decision_amendments = self.decision_amendments()
+        if decision_amendments:
+            lines.append("### Decision amendments")
+            lines.append("")
+            lines.append("| Amendment | Decision | Type | Status | Text | Rationale | Approver | Supersedes | Reason |")
+            lines.append("|-----------|----------|------|--------|------|-----------|----------|------------|--------|")
+            for amendment in decision_amendments:
+                status = amendment.status or "-"
+                text = amendment.text.replace("|", "\\|").replace("\n", " ")
+                rationale = (amendment.rationale or "-").replace("|", "\\|").replace("\n", " ")
+                approver = amendment.approved_by or "-"
+                supersedes = amendment.supersedes or "-"
+                reason = (amendment.reason or "-").replace("|", "\\|").replace("\n", " ")
+                lines.append(
+                    f"| {amendment.amendment_id} | {amendment.decision_id} | "
+                    f"{amendment.amendment_type} | {status} | {text} | {rationale} | "
+                    f"{approver} | {supersedes} | {reason} |"
                 )
             lines.append("")
         lines.append("## Timeline (audit log)")

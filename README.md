@@ -38,6 +38,13 @@ python -m interfaces.cli.coreline action outcome ACT-ABC123DEF456 \
   --outcome "Credential revoked and sessions invalidated"
 python -m interfaces.cli.coreline action cancel ACT-ABC123DEF456 \
   --reason "Superseded by containment playbook"
+python -m interfaces.cli.coreline decision create \
+  --type authorize-recovery \
+  --statement "Authorize staged recovery" \
+  --rationale "Containment completed and evidence reviewed" \
+  --claim CLM-ABC123DEF456 --action ACT-ABC123DEF456
+python -m interfaces.cli.coreline decision approve DEC-ABC123DEF456 \
+  --approved-by director@example.com --reason "Recovery authorized"
 python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -129,6 +136,25 @@ export CORELINE_ACTOR="$(whoami)"
   --outcome "Credential revoked and sessions invalidated"
 .venv/bin/python -m interfaces.cli.coreline action cancel ACT-ABC123DEF456 \
   --reason "Superseded by containment playbook"
+.venv/bin/python -m interfaces.cli.coreline decision create \
+  --type authorize-recovery \
+  --statement "Authorize staged recovery" \
+  --rationale "Containment completed and evidence reviewed" \
+  --claim CLM-ABC123DEF456 --action ACT-ABC123DEF456
+.venv/bin/python -m interfaces.cli.coreline decision list
+.venv/bin/python -m interfaces.cli.coreline decision show DEC-ABC123DEF456
+.venv/bin/python -m interfaces.cli.coreline decision amend DEC-ABC123DEF456 \
+  --statement "Authorize staged recovery for prod-db"
+.venv/bin/python -m interfaces.cli.coreline decision rationale DEC-ABC123DEF456 \
+  --rationale "Containment and integrity gates were reviewed"
+.venv/bin/python -m interfaces.cli.coreline decision approve DEC-ABC123DEF456 \
+  --approved-by director@example.com --reason "Recovery authorized"
+.venv/bin/python -m interfaces.cli.coreline decision reject DEC-ABC123DEF456 \
+  --reason "Legal review pending"
+.venv/bin/python -m interfaces.cli.coreline decision supersede DEC-ABC123DEF456 \
+  --by DEC-DEF456ABC123 --reason "New decision replaces earlier approach"
+.venv/bin/python -m interfaces.cli.coreline decision withdraw DEC-ABC123DEF456 \
+  --reason "Decision no longer applies"
 .venv/bin/python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 .venv/bin/python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 .venv/bin/python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -182,6 +208,13 @@ Actions are immutable responder activity records. An action may reference claims
 observations, evidence hashes, and stable Subjects from the same incident. Corrections,
 status changes, outcome updates, and cancellations are append-only amendments. Action
 creation and amendments are audited, verified, and included in the PIR.
+
+Decisions are immutable human incident-response judgments: what an authorized person
+decided and why. Decisions may reference Subjects, evidence, observations, claims, and
+actions from the same incident. Corrections, rationale updates, approvals, rejections,
+supersessions, and withdrawals are append-only amendments. AI identities are rejected as
+decision makers or approvers because AI is outside Coreline's authoritative trust path.
+Decision creation and amendments are audited, verified, and included in the PIR.
 
 Trusted signer registry workflow:
 

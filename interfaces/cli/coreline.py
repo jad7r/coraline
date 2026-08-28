@@ -38,6 +38,9 @@ from core.incident import (
     Claim,
     ClaimAmendment,
     CLAIM_STATUSES,
+    Decision,
+    DecisionAmendment,
+    DECISION_STATUSES,
     IncidentWorkspace,
     OBSERVATION_DISPOSITIONS,
     Observation,
@@ -103,6 +106,7 @@ observe_app = typer.Typer(no_args_is_help=True, help="Investigative observations
 claim_app = typer.Typer(no_args_is_help=True, help="Investigative claims.")
 action_app = typer.Typer(no_args_is_help=True, help="Responder actions.")
 subject_app = typer.Typer(no_args_is_help=True, help="Investigative subjects and entities.")
+decision_app = typer.Typer(no_args_is_help=True, help="Human incident-response decisions.")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(timeline_app, name="timeline")
 app.add_typer(registry_app, name="registry")
@@ -111,6 +115,7 @@ app.add_typer(observe_app, name="observe")
 app.add_typer(claim_app, name="claim")
 app.add_typer(action_app, name="action")
 app.add_typer(subject_app, name="subject")
+app.add_typer(decision_app, name="decision")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -286,6 +291,53 @@ def _action_amendment_rows(table: Table, amendments: List[ActionAmendment]) -> N
             amendment.status or "",
             amendment.text,
             amendment.outcome or "",
+            amendment.reason or "",
+        )
+
+
+def _decision_panel(
+    decision: Decision,
+    current_status: Optional[str] = None,
+    current_statement: Optional[str] = None,
+    current_rationale: Optional[str] = None,
+    current_approved_by: Optional[str] = None,
+) -> Panel:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("decision", Text(decision.decision_id, style=C_ACCENT))
+    table.add_row("incident", decision.incident_id)
+    table.add_row("created", decision.created_at)
+    table.add_row("type", decision.decision_type)
+    table.add_row("status", current_status or decision.status)
+    table.add_row("decided by", decision.decided_by)
+    approver = current_approved_by if current_approved_by is not None else decision.approved_by
+    if approver:
+        table.add_row("approved by", approver)
+    table.add_row("subjects", _subject_refs(decision.subjects))
+    table.add_row("evidence", _evidence_refs(decision.evidence))
+    table.add_row("observations", _action_refs(decision.observations))
+    table.add_row("claims", _action_refs(decision.claims))
+    table.add_row("actions", _action_refs(decision.actions))
+    table.add_row("statement", current_statement or decision.statement)
+    table.add_row("rationale", current_rationale or decision.rationale)
+    if decision.alternatives_considered:
+        table.add_row("alternatives", "; ".join(decision.alternatives_considered))
+    return Panel(table, title="[bold]DECISION[/]", border_style="cyan",
+                 box=box.ROUNDED)
+
+
+def _decision_amendment_rows(table: Table, amendments: List[DecisionAmendment]) -> None:
+    for amendment in amendments:
+        table.add_row(
+            amendment.amendment_id,
+            amendment.created_at.replace("T", " ")[:19],
+            amendment.amendment_type,
+            amendment.status or "",
+            amendment.text,
+            amendment.rationale or "",
+            amendment.approved_by or "",
+            amendment.supersedes or "",
             amendment.reason or "",
         )
 
@@ -1020,6 +1072,248 @@ def action_cancel(
         console.print(f"[{C_BAD}]✗ {e}[/]")
         raise typer.Exit(code=1)
     console.print(f"[{C_OK}]✓ action cancellation recorded[/] {amendment.amendment_id}")
+
+
+# ---- decisions ------------------------------------------------------------- #
+
+@decision_app.command("create")
+def decision_create(
+    decision_type: str = typer.Option(..., "--type", "-t", help="Decision type, e.g. authorize-recovery."),
+    statement: str = typer.Option(..., "--statement", "-s", help="What was decided."),
+    rationale: str = typer.Option(..., "--rationale", "-r", help="Why this decision was made."),
+    decided_by: Optional[str] = typer.Option(None, "--decided-by", help="Human decision maker."),
+    status: str = typer.Option("PROPOSED", "--status", help=f"One of {', '.join(DECISION_STATUSES)}."),
+    approved_by: Optional[str] = typer.Option(None, "--approved-by", help="Human approver for APPROVED decisions."),
+    alternative: Optional[List[str]] = typer.Option(None, "--alternative", help="Alternative considered."),
+    subject: Optional[List[str]] = typer.Option(None, "--subject-id", help="Related subject ID."),
+    evidence: Optional[List[str]] = typer.Option(None, "--evidence", "-e", help="Supporting evidence SHA-256 or prefix."),
+    observation: Optional[List[str]] = typer.Option(None, "--observation", "-o", help="Supporting observation ID."),
+    claim: Optional[List[str]] = typer.Option(None, "--claim", "-c", help="Supporting claim ID."),
+    action_ref: Optional[List[str]] = typer.Option(None, "--action", "-a", help="Related action ID."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Record an immutable human incident-response decision."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        decision = ws.create_decision(
+            decision_type=decision_type,
+            statement=statement,
+            rationale=rationale,
+            decided_by=decided_by or who,
+            actor=who,
+            status=status,
+            approved_by=approved_by,
+            alternatives_considered=alternative or [],
+            subject_refs=subject or [],
+            evidence_refs=evidence or [],
+            observation_refs=observation or [],
+            claim_refs=claim or [],
+            action_refs=action_ref or [],
+        )
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(_decision_panel(decision))
+
+
+@decision_app.command("list")
+def decision_list(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """List incident-response decisions."""
+    ws = _load(home, incident_id)
+    decisions = ws.decisions()
+    table = Table(
+        title=f"[bold]DECISIONS[/]  {ws.incident_id}",
+        box=box.SIMPLE_HEAVY,
+        header_style=C_ACCENT,
+        border_style="cyan",
+        pad_edge=False,
+    )
+    table.add_column("id", style=C_ACCENT, no_wrap=True)
+    table.add_column("created", style=C_DIM, no_wrap=True)
+    table.add_column("status", no_wrap=True)
+    table.add_column("type", no_wrap=True)
+    table.add_column("refs", style=C_DIM, no_wrap=True)
+    table.add_column("decision", overflow="fold", ratio=1)
+    for decision in decisions:
+        effective = ws.effective_decision(decision.decision_id)
+        refs = list(decision.subjects) + list(decision.claims) + list(decision.actions)
+        table.add_row(
+            decision.decision_id[:12],
+            decision.created_at.replace("T", " ")[:19],
+            effective.current_status,
+            decision.decision_type,
+            ", ".join(refs) if refs else "none",
+            effective.current_statement,
+        )
+    console.print(table)
+    console.print(f"[{C_DIM}]{len(decisions)} decision(s)[/]")
+
+
+@decision_app.command("show")
+def decision_show(
+    decision_id: str = typer.Argument(..., help="Decision ID."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Show one decision and amendment history."""
+    ws = _load(home, incident_id)
+    try:
+        decision = ws.decision(decision_id)
+        effective = ws.effective_decision(decision_id)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(_decision_panel(
+        decision,
+        effective.current_status,
+        effective.current_statement,
+        effective.current_rationale,
+        effective.current_approved_by,
+    ))
+    amendments = ws.decision_amendments(decision_id)
+    if amendments:
+        table = Table(
+            title=f"[bold]DECISION AMENDMENTS[/]  {decision_id}",
+            box=box.SIMPLE_HEAVY,
+            header_style=C_ACCENT,
+            border_style="cyan",
+            pad_edge=False,
+        )
+        table.add_column("id", style=C_ACCENT, no_wrap=True)
+        table.add_column("created", style=C_DIM, no_wrap=True)
+        table.add_column("type", no_wrap=True)
+        table.add_column("status", no_wrap=True)
+        table.add_column("text", overflow="fold", ratio=1)
+        table.add_column("rationale", overflow="fold", ratio=1)
+        table.add_column("approver", no_wrap=True)
+        table.add_column("supersedes", no_wrap=True)
+        table.add_column("reason", overflow="fold", ratio=1)
+        _decision_amendment_rows(table, amendments)
+        console.print(table)
+
+
+@decision_app.command("approve")
+def decision_approve(
+    decision_id: str = typer.Argument(..., help="Decision ID."),
+    approved_by: str = typer.Option(..., "--approved-by", help="Human approver."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Approval rationale."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append approval to a proposed decision."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.approve_decision(decision_id, approved_by, who, reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ decision approved[/] {amendment.amendment_id}")
+
+
+@decision_app.command("reject")
+def decision_reject(
+    decision_id: str = typer.Argument(..., help="Decision ID."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Rejection reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append rejection to a proposed decision."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.reject_decision(decision_id, who, reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ decision rejected[/] {amendment.amendment_id}")
+
+
+@decision_app.command("amend")
+def decision_amend(
+    decision_id: str = typer.Argument(..., help="Decision ID."),
+    correction: str = typer.Option(..., "--statement", "-s", help="Corrected decision statement."),
+    reason: Optional[str] = typer.Option(None, "--reason", "-r", help="Optional correction reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a correction to an immutable decision statement."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.amend_decision(decision_id, correction, who, reason=reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ decision correction recorded[/] {amendment.amendment_id}")
+
+
+@decision_app.command("rationale")
+def decision_rationale(
+    decision_id: str = typer.Argument(..., help="Decision ID."),
+    rationale: str = typer.Option(..., "--rationale", "-r", help="Updated rationale."),
+    reason: Optional[str] = typer.Option(None, "--reason", help="Optional update reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append a rationale update to an immutable decision."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.update_decision_rationale(decision_id, rationale, who, reason=reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ decision rationale recorded[/] {amendment.amendment_id}")
+
+
+@decision_app.command("supersede")
+def decision_supersede(
+    decision_id: str = typer.Argument(..., help="Decision ID to supersede."),
+    superseded_by: str = typer.Option(..., "--by", help="Replacement decision ID."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Supersession reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append supersession to a decision."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.supersede_decision(decision_id, superseded_by, who, reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ decision superseded[/] {amendment.amendment_id}")
+
+
+@decision_app.command("withdraw")
+def decision_withdraw(
+    decision_id: str = typer.Argument(..., help="Decision ID."),
+    reason: str = typer.Option(..., "--reason", "-r", help="Withdrawal reason."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Append withdrawal to a decision."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        amendment = ws.withdraw_decision(decision_id, who, reason)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(f"[{C_OK}]✓ decision withdrawn[/] {amendment.amendment_id}")
 
 
 # ---- lifecycle -------------------------------------------------------------- #

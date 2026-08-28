@@ -1146,6 +1146,200 @@ def test_verify_actions_detects_status_after_cancellation_in_store(home: Path):
     assert any("status after cancellation" in err for err in v["action_errors"])
 
 
+# ---- decisions -------------------------------------------------------------- #
+
+def _seed_decision_refs(ws: IncidentWorkspace, evidence_file: Path):
+    evidence = ws.add_evidence(str(evidence_file), note="n", actor="a")
+    subject = ws.create_subject("HOST", "host-01", actor="a")
+    obs = ws.add_observation("EDR shows malware execution", actor="a",
+                             evidence_refs=[evidence["sha256"]],
+                             subject_refs=[subject.subject_id])
+    claim = ws.add_claim("Host was compromised", actor="a",
+                         observation_refs=[obs.observation_id],
+                         subject_refs=[subject.subject_id])
+    action = ws.create_action("host-isolation", "Isolated host-01", actor="a",
+                              claim_refs=[claim.claim_id],
+                              observation_refs=[obs.observation_id],
+                              evidence_refs=[evidence["sha256"]],
+                              subject_refs=[subject.subject_id])
+    return evidence, subject, obs, claim, action
+
+
+def test_create_decision_references_records_and_audits(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    evidence, subject, obs, claim, action = _seed_decision_refs(ws, evidence_file)
+
+    decision = ws.create_decision(
+        "authorize-recovery",
+        "Authorize recovery of host-01",
+        "Containment action completed and supporting evidence reviewed",
+        decided_by="lead@example.com",
+        actor="lead@example.com",
+        subject_refs=[subject.subject_id],
+        evidence_refs=[evidence["sha256"][:16]],
+        observation_refs=[obs.observation_id],
+        claim_refs=[claim.claim_id],
+        action_refs=[action.action_id],
+        alternatives_considered=["Keep host isolated for more analysis"],
+    )
+
+    assert decision.decision_id.startswith("DEC-")
+    assert decision.subjects == (subject.subject_id,)
+    assert decision.evidence == (evidence["sha256"],)
+    assert decision.observations == (obs.observation_id,)
+    assert decision.claims == (claim.claim_id,)
+    assert decision.actions == (action.action_id,)
+    assert ws.verify()["decisions"] is True
+    entry = ws.audit_entries()[-1]
+    assert entry.action == "decision-created"
+    assert entry.detail["decision_id"] == decision.decision_id
+    assert entry.detail["record_hash"] == decision.record_hash()
+
+
+def test_decision_rejects_invalid_references_and_ai_authority(home: Path):
+    ws = _declare(home)
+
+    with pytest.raises(WorkspaceError, match="observation not found"):
+        ws.create_decision("notify", "Notify customer", "Impact confirmed",
+                           decided_by="lead", actor="lead",
+                           observation_refs=["OBS-NOPE"])
+    with pytest.raises(WorkspaceError, match="subject not found"):
+        ws.create_decision("notify", "Notify customer", "Impact confirmed",
+                           decided_by="lead", actor="lead",
+                           subject_refs=["SUB-NOPE"])
+    with pytest.raises(WorkspaceError, match="human authority"):
+        ws.create_decision("notify", "Notify customer", "Impact confirmed",
+                           decided_by="ai:assistant", actor="lead")
+    with pytest.raises(WorkspaceError, match="APPROVED decisions require"):
+        ws.create_decision("notify", "Notify customer", "Impact confirmed",
+                           decided_by="lead", actor="lead", status="APPROVED")
+    with pytest.raises(WorkspaceError, match="human authority"):
+        ws.create_decision("notify", "Notify customer", "Impact confirmed",
+                           decided_by="lead", actor="lead", status="APPROVED",
+                           approved_by="llm:agent")
+
+
+def test_decision_amendments_are_append_only_and_effective_state_is_deterministic(home: Path):
+    ws = _declare(home)
+    decision = ws.create_decision(
+        "containment",
+        "Delay host isolation",
+        "Need volatile memory capture",
+        decided_by="lead",
+        actor="lead",
+    )
+
+    correction = ws.amend_decision(
+        decision.decision_id,
+        "Delay host isolation until memory capture completes",
+        actor="lead",
+        reason="Clarify condition",
+    )
+    rationale = ws.update_decision_rationale(
+        decision.decision_id,
+        "Forensic memory image is needed before network isolation",
+        actor="lead",
+        reason="Add forensic rationale",
+    )
+    approval = ws.approve_decision(
+        decision.decision_id,
+        approved_by="director@example.com",
+        actor="lead",
+        reason="Director approved containment delay",
+    )
+
+    assert ws.decision(decision.decision_id).statement == "Delay host isolation"
+    effective = ws.effective_decision(decision.decision_id)
+    assert effective.current_statement == correction.text
+    assert effective.current_rationale == rationale.rationale
+    assert effective.current_status == "APPROVED"
+    assert effective.current_approved_by == "director@example.com"
+    assert effective.approval == approval
+    assert ws.verify()["decisions"] is True
+
+
+def test_decision_terminal_status_blocks_later_amendment(home: Path):
+    ws = _declare(home)
+    decision = ws.create_decision("notify", "Notify customer", "Impact confirmed",
+                                  decided_by="lead", actor="lead")
+    ws.reject_decision(decision.decision_id, actor="lead", reason="Legal requested delay")
+
+    with pytest.raises(WorkspaceError, match="terminal"):
+        ws.amend_decision(decision.decision_id, "Notify later", actor="lead")
+    with pytest.raises(WorkspaceError, match="cannot move decision"):
+        ws.approve_decision(decision.decision_id, "director", actor="lead", reason="late")
+
+
+def test_decision_supersession_rejects_self_and_foreign(home: Path):
+    ws = _declare(home)
+    first = ws.create_decision("notify", "Notify customer", "Impact confirmed",
+                               decided_by="lead", actor="lead")
+    second = ws.create_decision("notify", "Delay notification", "Legal review pending",
+                                decided_by="lead", actor="lead")
+    foreign = IncidentWorkspace.declare(home, title="foreign", severity="SEV3", actor="a")
+    foreign_decision = foreign.create_decision("notify", "Foreign", "Different case",
+                                               decided_by="lead", actor="lead")
+
+    with pytest.raises(WorkspaceError, match="cannot supersede itself"):
+        ws.supersede_decision(first.decision_id, first.decision_id, actor="lead", reason="bad")
+    with pytest.raises(WorkspaceError, match="decision not found"):
+        ws.supersede_decision(first.decision_id, foreign_decision.decision_id,
+                              actor="lead", reason="foreign")
+
+    amendment = ws.supersede_decision(first.decision_id, second.decision_id,
+                                      actor="lead", reason="Better decision")
+    assert amendment.amendment_type == "SUPERSEDE"
+    assert ws.effective_decision(first.decision_id).current_status == "SUPERSEDED"
+    assert ws.verify()["decisions"] is True
+
+
+def test_decision_tampering_and_deleted_amendment_are_detected(home: Path):
+    ws = _declare(home)
+    decision = ws.create_decision("notify", "Notify customer", "Impact confirmed",
+                                  decided_by="lead", actor="lead")
+    amendment = ws.amend_decision(decision.decision_id, "Notify affected customer", actor="lead")
+
+    data = json.loads(ws._decisions_path.read_text(encoding="utf-8"))
+    data["decisions"][0]["rationale"] = "Tampered rationale"
+    ws._decisions_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    v = ws.verify()
+    assert v["decisions"] is False
+    assert any(decision.decision_id in err for err in v["decision_errors"])
+
+    data["decisions"][0]["rationale"] = "Impact confirmed"
+    data["amendments"] = []
+    ws._decisions_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    v = ws.verify()
+    assert v["decisions"] is False
+    assert any(f"{amendment.amendment_id}: audit event has no decision amendment record" in err
+               for err in v["decision_errors"])
+
+
+def test_decision_report_and_closed_incident_lock(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    _, subject, obs, claim, action = _seed_decision_refs(ws, evidence_file)
+    decision = ws.create_decision(
+        "authorize-recovery",
+        "Authorize recovery",
+        "Containment complete",
+        decided_by="lead",
+        actor="lead",
+        subject_refs=[subject.subject_id],
+        observation_refs=[obs.observation_id],
+        claim_refs=[claim.claim_id],
+        action_refs=[action.action_id],
+    )
+
+    md = ws.generate_report(actor="lead")
+    assert "## Decisions" in md
+    assert decision.decision_id in md
+    assert "Authorize recovery" in md
+
+    ws.close_incident(actor="lead")
+    with pytest.raises(WorkspaceError, match="decisions are locked"):
+        ws.create_decision("late", "Late decision", "Too late", decided_by="lead", actor="lead")
+
+
 # ---- gates + report ---------------------------------------------------------- #
 
 def test_gates_progress_from_declare_to_report(home: Path, evidence_file: Path):
