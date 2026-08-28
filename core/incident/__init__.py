@@ -1,5 +1,11 @@
 """Incident workspace domain model for Coreline."""
 
+from .case_graph import (
+    CaseGraph,
+    CaseGraphEdge,
+    CaseGraphNode,
+    build_case_graph,
+)
 from .workspace import (
     Action,
     ActionAmendment,
@@ -40,6 +46,9 @@ __all__ = [
     "ACTION_AMENDMENT_TYPES",
     "ACTION_STATUSES",
     "AuditEntry",
+    "CaseGraph",
+    "CaseGraphEdge",
+    "CaseGraphNode",
     "Claim",
     "ClaimAmendment",
     "CLAIM_AMENDMENT_TYPES",
@@ -63,6 +72,7 @@ __all__ = [
     "SUBJECT_TYPES",
     "Subject",
     "WorkspaceError",
+    "build_case_graph",
     "default_actor",
     "new_incident_id",
     "verify_audit",

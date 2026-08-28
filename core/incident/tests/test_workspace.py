@@ -1340,6 +1340,100 @@ def test_decision_report_and_closed_incident_lock(home: Path, evidence_file: Pat
         ws.create_decision("late", "Late decision", "Too late", decided_by="lead", actor="lead")
 
 
+# ---- case graph ------------------------------------------------------------- #
+
+def test_case_graph_rebuild_is_deterministic_and_uses_explicit_edges(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    evidence, subject, obs, claim, action = _seed_decision_refs(ws, evidence_file)
+    decision = ws.create_decision(
+        "authorize-recovery",
+        "Authorize recovery",
+        "Containment complete",
+        decided_by="lead",
+        actor="lead",
+        subject_refs=[subject.subject_id],
+        evidence_refs=[evidence["sha256"]],
+        observation_refs=[obs.observation_id],
+        claim_refs=[claim.claim_id],
+        action_refs=[action.action_id],
+    )
+
+    first = ws.case_graph().to_dict()
+    second = IncidentWorkspace.load(home, ws.incident_id).case_graph().to_dict()
+
+    assert first == second
+    graph = ws.case_graph()
+    assert graph.verify() == (True, [])
+    summary = graph.summary()
+    assert summary["evidence"] == 1
+    assert summary["subject"] == 1
+    assert summary["observation"] == 1
+    assert summary["claim"] == 1
+    assert summary["action"] == 1
+    assert summary["decision"] == 1
+    edge_ids = {edge.edge_id for edge in graph.edges}
+    assert f"EVIDENCE:{evidence['sha256']}--SUPPORTS-->OBSERVATION:{obs.observation_id}" in edge_ids
+    assert f"OBSERVATION:{obs.observation_id}--SUPPORTS-->CLAIM:{claim.claim_id}" in edge_ids
+    assert f"CLAIM:{claim.claim_id}--JUSTIFIES-->ACTION:{action.action_id}" in edge_ids
+    assert f"ACTION:{action.action_id}--INFORMS-->DECISION:{decision.decision_id}" in edge_ids
+    assert f"SUBJECT:{subject.subject_id}--CONSIDERED_IN-->DECISION:{decision.decision_id}" in edge_ids
+
+
+def test_case_graph_decision_supersession_edge(home: Path):
+    ws = _declare(home)
+    old = ws.create_decision("notify", "Notify now", "Impact likely",
+                             decided_by="lead", actor="lead")
+    new = ws.create_decision("notify", "Delay notification", "Legal review",
+                             decided_by="lead", actor="lead")
+    ws.supersede_decision(old.decision_id, new.decision_id, actor="lead", reason="Legal")
+
+    edge_ids = {edge.edge_id for edge in ws.case_graph().edges}
+    assert f"DECISION:{new.decision_id}--SUPERSEDES-->DECISION:{old.decision_id}" in edge_ids
+
+
+def test_case_graph_validation_detects_invalid_edges():
+    from core.incident.case_graph import CaseGraph, CaseGraphEdge, CaseGraphNode
+
+    graph = CaseGraph(
+        incident_id="INC-X",
+        nodes=(
+            CaseGraphNode("CLAIM:CLM-1", "CLAIM", "CLM-1", "claim"),
+            CaseGraphNode("EVIDENCE:abc", "EVIDENCE", "abc", "evidence"),
+        ),
+        edges=(
+            CaseGraphEdge("bad", "CLAIM:CLM-1", "EVIDENCE:abc", "SUPPORTS"),
+            CaseGraphEdge("dangling", "MISSING:1", "EVIDENCE:abc", "SUPPORTS"),
+        ),
+    )
+
+    ok, errors = graph.verify()
+    assert ok is False
+    assert any("invalid edge" in err for err in errors)
+    assert any("dangling source" in err for err in errors)
+
+
+def test_report_includes_case_relationships(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    _, subject, obs, claim, action = _seed_decision_refs(ws, evidence_file)
+    decision = ws.create_decision(
+        "authorize-recovery",
+        "Authorize recovery",
+        "Containment complete",
+        decided_by="lead",
+        actor="lead",
+        subject_refs=[subject.subject_id],
+        observation_refs=[obs.observation_id],
+        claim_refs=[claim.claim_id],
+        action_refs=[action.action_id],
+    )
+
+    md = ws.generate_report(actor="lead")
+
+    assert "## Case relationships" in md
+    assert f"CLAIM:{claim.claim_id}` --JUSTIFIES--> `ACTION:{action.action_id}" in md
+    assert f"ACTION:{action.action_id}` --INFORMS--> `DECISION:{decision.decision_id}" in md
+
+
 # ---- gates + report ---------------------------------------------------------- #
 
 def test_gates_progress_from_declare_to_report(home: Path, evidence_file: Path):

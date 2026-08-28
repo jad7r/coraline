@@ -45,6 +45,8 @@ python -m interfaces.cli.coreline decision create \
   --claim CLM-ABC123DEF456 --action ACT-ABC123DEF456
 python -m interfaces.cli.coreline decision approve DEC-ABC123DEF456 \
   --approved-by director@example.com --reason "Recovery authorized"
+python -m interfaces.cli.coreline graph show
+python -m interfaces.cli.coreline graph verify
 python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -155,6 +157,9 @@ export CORELINE_ACTOR="$(whoami)"
   --by DEC-DEF456ABC123 --reason "New decision replaces earlier approach"
 .venv/bin/python -m interfaces.cli.coreline decision withdraw DEC-ABC123DEF456 \
   --reason "Decision no longer applies"
+.venv/bin/python -m interfaces.cli.coreline graph show
+.venv/bin/python -m interfaces.cli.coreline graph show --format json
+.venv/bin/python -m interfaces.cli.coreline graph verify
 .venv/bin/python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 .venv/bin/python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 .venv/bin/python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -215,6 +220,26 @@ actions from the same incident. Corrections, rationale updates, approvals, rejec
 supersessions, and withdrawals are append-only amendments. AI identities are rejected as
 decision makers or approvers because AI is outside Coreline's authoritative trust path.
 Decision creation and amendments are audited, verified, and included in the PIR.
+
+The Case Graph is a deterministic projection, not another source of truth. It can be
+deleted and rebuilt from authoritative incident state. Graph nodes represent Evidence,
+Subjects, Observations, Claims, Actions, and Decisions. Graph edges are created only from
+explicit stored references such as evidence supporting an observation, an observation
+supporting a claim, a claim justifying an action, an action informing a decision, or a
+Subject being associated with one of those records. The PIR includes a textual Case
+Relationships section derived from this projection.
+
+Conceptually:
+
+```text
+Evidence = what was preserved
+Observation = what an investigator observed
+Claim = what the investigation asserts
+Action = what responders did
+Decision = what authorized humans decided and why
+Subject = what those records concern
+Case Graph = deterministic relationships among those records
+```
 
 Trusted signer registry workflow:
 

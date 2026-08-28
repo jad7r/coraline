@@ -3846,6 +3846,18 @@ class IncidentWorkspace:
             and event.detail.get("record_hash") == amendment.record_hash()
         )
 
+    # -- deterministic case graph -------------------------------------------- #
+    def case_graph(self):
+        from .case_graph import build_case_graph
+        return build_case_graph(self)
+
+    def verify_case_graph(self) -> Tuple[bool, List[str]]:
+        try:
+            graph = self.case_graph()
+        except Exception as exc:
+            return False, [f"case graph build failed: {exc}"]
+        return graph.verify()
+
     # -- evidence + manifest --------------------------------------------------- #
     def _load_manifest(self) -> EvidenceManifest:
         if self._manifest_path.exists():
@@ -3950,6 +3962,8 @@ class IncidentWorkspace:
             "action_errors": [],
             "decisions": True,
             "decision_errors": [],
+            "case_graph": True,
+            "case_graph_errors": [],
         }
         manifest = None
         if self._manifest_path.exists() and self._sig_path.exists():
@@ -3994,6 +4008,9 @@ class IncidentWorkspace:
         decisions_ok, decision_errors = self.verify_decisions()
         result["decisions"] = decisions_ok
         result["decision_errors"] = decision_errors
+        graph_ok, graph_errors = self.verify_case_graph()
+        result["case_graph"] = graph_ok
+        result["case_graph_errors"] = graph_errors
         return result
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
@@ -4071,6 +4088,9 @@ class IncidentWorkspace:
             Gate("decisions", "Decisions reference valid investigation records", v["decisions"],
                  "verified" if v["decisions"]
                  else f"{len(v['decision_errors'])} issue(s)"),
+            Gate("case_graph", "Case graph projection is rebuildable", v["case_graph"],
+                 "verified" if v["case_graph"]
+                 else f"{len(v['case_graph_errors'])} issue(s)"),
             Gate("report", "PIR generated", report_exists,
                  "present" if report_exists else "not yet generated"),
         ]
@@ -4310,6 +4330,17 @@ class IncidentWorkspace:
                     f"{approver} | {supersedes} | {reason} |"
                 )
             lines.append("")
+        lines.append("## Case relationships")
+        lines.append("")
+        graph = self.case_graph()
+        if graph.edges:
+            for edge in graph.edges:
+                lines.append(
+                    f"- `{edge.source}` --{edge.relationship}--> `{edge.target}`"
+                )
+        else:
+            lines.append("_No explicit case relationships recorded._")
+        lines.append("")
         lines.append("## Timeline (audit log)")
         lines.append("")
         lines.append("| Seq | Time | Actor | Action | Detail |")

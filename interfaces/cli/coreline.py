@@ -107,6 +107,7 @@ claim_app = typer.Typer(no_args_is_help=True, help="Investigative claims.")
 action_app = typer.Typer(no_args_is_help=True, help="Responder actions.")
 subject_app = typer.Typer(no_args_is_help=True, help="Investigative subjects and entities.")
 decision_app = typer.Typer(no_args_is_help=True, help="Human incident-response decisions.")
+graph_app = typer.Typer(no_args_is_help=True, help="Deterministic case graph projection.")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(timeline_app, name="timeline")
 app.add_typer(registry_app, name="registry")
@@ -116,6 +117,7 @@ app.add_typer(claim_app, name="claim")
 app.add_typer(action_app, name="action")
 app.add_typer(subject_app, name="subject")
 app.add_typer(decision_app, name="decision")
+app.add_typer(graph_app, name="graph")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -1314,6 +1316,65 @@ def decision_withdraw(
         console.print(f"[{C_BAD}]✗ {e}[/]")
         raise typer.Exit(code=1)
     console.print(f"[{C_OK}]✓ decision withdrawn[/] {amendment.amendment_id}")
+
+
+# ---- case graph ------------------------------------------------------------ #
+
+@graph_app.command("show")
+def graph_show(
+    output_format: str = typer.Option("table", "--format", help="table or json."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Show the deterministic case graph projection."""
+    ws = _load(home, incident_id)
+    graph = ws.case_graph()
+    if output_format.lower() == "json":
+        console.print(json.dumps(graph.to_dict(), indent=2, sort_keys=True))
+        return
+    if output_format.lower() != "table":
+        console.print(f"[{C_BAD}]✗ invalid graph format: {output_format}[/]")
+        raise typer.Exit(code=1)
+
+    summary = graph.summary()
+    summary_table = Table.grid(padding=(0, 2))
+    summary_table.add_column(style=C_DIM, justify="right")
+    summary_table.add_column()
+    for key in ("evidence", "subject", "observation", "claim", "action", "decision", "relationships"):
+        summary_table.add_row(key, str(summary.get(key, 0)))
+    console.print(Panel(summary_table, title="[bold]CASE GRAPH[/]", border_style="cyan",
+                        box=box.ROUNDED))
+
+    table = Table(
+        title=f"[bold]RELATIONSHIPS[/]  {ws.incident_id}",
+        box=box.SIMPLE_HEAVY,
+        header_style=C_ACCENT,
+        border_style="cyan",
+        pad_edge=False,
+    )
+    table.add_column("source", style=C_ACCENT, overflow="fold", ratio=1)
+    table.add_column("relationship", no_wrap=True)
+    table.add_column("target", style=C_ACCENT, overflow="fold", ratio=1)
+    for edge in graph.edges:
+        table.add_row(edge.source, edge.relationship, edge.target)
+    console.print(table)
+
+
+@graph_app.command("verify")
+def graph_verify(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Verify the deterministic case graph projection."""
+    ws = _load(home, incident_id)
+    ok, errors = ws.verify_case_graph()
+    if ok:
+        console.print(f"[{C_OK}]✓ case graph verified[/]")
+        return
+    console.print(f"[{C_BAD}]✗ case graph verification failed[/]")
+    for error in errors:
+        console.print(f"  - {error}")
+    raise typer.Exit(code=1)
 
 
 # ---- lifecycle -------------------------------------------------------------- #

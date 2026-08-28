@@ -202,7 +202,7 @@ def render_sidebar() -> str:
         "Workspace",
         (
             "Overview", "Evidence", "Subjects", "Observations", "Claims",
-            "Actions", "Decisions", "Timeline", "Reports",
+            "Actions", "Decisions", "Case Graph", "Timeline", "Reports",
         ),
         key="workspace_nav",
     )
@@ -1031,6 +1031,44 @@ def render_decisions(ws: IncidentWorkspace) -> None:
                             st.error(str(exc))
 
 
+def render_case_graph(ws: IncidentWorkspace) -> None:
+    st.markdown('<div class="section-title">Case Graph</div>', unsafe_allow_html=True)
+    graph = ws.case_graph()
+    ok, errors = graph.verify()
+    st.markdown(
+        f'<span class="{"trust-ok" if ok else "trust-bad"}">'
+        f'{"Graph projection verified" if ok else "Graph projection issue detected"}</span>',
+        unsafe_allow_html=True,
+    )
+    if errors:
+        for error in errors:
+            st.error(error)
+
+    summary = graph.summary()
+    c1, c2, c3, c4, c5, c6, c7 = st.columns(7)
+    c1.metric("Evidence", summary.get("evidence", 0))
+    c2.metric("Subjects", summary.get("subject", 0))
+    c3.metric("Observations", summary.get("observation", 0))
+    c4.metric("Claims", summary.get("claim", 0))
+    c5.metric("Actions", summary.get("action", 0))
+    c6.metric("Decisions", summary.get("decision", 0))
+    c7.metric("Relationships", summary.get("relationships", 0))
+
+    st.markdown('<div class="band"></div>', unsafe_allow_html=True)
+    if not graph.edges:
+        st.info("No explicit relationships recorded yet.")
+        return
+    rows = [
+        {
+            "source": edge.source,
+            "relationship": edge.relationship,
+            "target": edge.target,
+        }
+        for edge in graph.edges
+    ]
+    st.dataframe(rows, use_container_width=True, hide_index=True)
+
+
 def render_timeline(ws: IncidentWorkspace, verify_result) -> None:
     st.markdown('<div class="section-title">Timeline</div>', unsafe_allow_html=True)
     if verify_result["audit_chain"]:
@@ -1130,6 +1168,8 @@ with main_col:
         render_actions(ws)
     elif nav == "Decisions":
         render_decisions(ws)
+    elif nav == "Case Graph":
+        render_case_graph(ws)
     elif nav == "Timeline":
         render_timeline(ws, verify_result)
     elif nav == "Reports":

@@ -44,7 +44,7 @@ def test_incident_loading_and_navigation(tmp_path: Path):
     assert "Integrity verified" in blob
     assert at.radio[1].options == [
         "Overview", "Evidence", "Subjects", "Observations", "Claims",
-        "Actions", "Decisions", "Timeline", "Reports",
+        "Actions", "Decisions", "Case Graph", "Timeline", "Reports",
     ]
 
     _nav(at, "Evidence")
@@ -59,6 +59,8 @@ def test_incident_loading_and_navigation(tmp_path: Path):
     assert "Actions" in _md(at)
     _nav(at, "Decisions")
     assert "Decisions" in _md(at)
+    _nav(at, "Case Graph")
+    assert "Case Graph" in _md(at)
     _nav(at, "Timeline")
     assert "AUDIT CHAIN VERIFIED" in _md(at)
 
@@ -318,6 +320,29 @@ def test_decision_create_workflow(tmp_path: Path):
     assert decision.subjects == (subject.subject_id,)
     assert decision.claims == (claim.claim_id,)
     assert decision.actions == (action.action_id,)
+
+
+def test_case_graph_view_lists_relationships(tmp_path: Path):
+    ws = _seed(tmp_path)
+    subject = ws.create_subject("HOST", "host-01", actor="alice@example.com")
+    obs = ws.add_observation("EDR shows malware execution", actor="alice@example.com",
+                             subject_refs=[subject.subject_id])
+    claim = ws.add_claim("Host was compromised", actor="alice@example.com",
+                         observation_refs=[obs.observation_id],
+                         subject_refs=[subject.subject_id])
+    action = ws.create_action("host-isolation", "Isolated host-01",
+                              actor="alice@example.com",
+                              claim_refs=[claim.claim_id],
+                              subject_refs=[subject.subject_id])
+    ws.create_decision("authorize-recovery", "Authorize recovery",
+                       "Containment complete", decided_by="lead",
+                       actor="alice@example.com", action_refs=[action.action_id])
+
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    _nav(at, "Case Graph")
+    assert "Graph projection verified" in _md(at)
+    assert "INFORMS" in str(at.dataframe[0].value)
 
 
 def test_lifecycle_controls(tmp_path: Path):

@@ -21,7 +21,7 @@ def test_help_lists_all_commands():
     for cmd in (
         "declare", "doctor", "evidence", "timeline", "status", "report",
         "use", "close", "verify", "registry", "lifecycle", "observe", "claim",
-        "action", "subject", "decision",
+        "action", "subject", "decision", "graph",
     ):
         assert cmd in res.output
 
@@ -609,6 +609,50 @@ def test_decision_supersede_withdraw_and_reject_cli(tmp_path: Path):
     r = _run(["decision", "reject", fourth_id, "--reason", "No vendor impact"], home)
     assert r.exit_code == 0, r.output
     assert "decision rejected" in r.output
+
+
+def test_graph_show_verify_and_json_export(tmp_path: Path):
+    home = tmp_path / "incidents"
+    ev = tmp_path / "edr.log"
+    ev.write_text("host isolation telemetry\n", encoding="utf-8")
+
+    r = _run(["declare", "--title", "Host compromise", "--severity", "SEV1"], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["evidence", "add", "--file", str(ev), "--note", "EDR telemetry"], home)
+    assert r.exit_code == 0, r.output
+    r = _run(["subject", "create", "--type", "HOST", "--value", "host-01"], home)
+    subject_id = next(part for part in r.output.split() if part.startswith("SUB-"))
+    r = _run(["observe", "add", "--text", "EDR shows malware execution",
+              "--subject-id", subject_id], home)
+    obs_id = next(part for part in r.output.split() if part.startswith("OBS-"))
+    r = _run(["claim", "add", "--text", "Host was compromised",
+              "--observation", obs_id, "--subject-id", subject_id], home)
+    claim_id = next(part for part in r.output.split() if part.startswith("CLM-"))
+    r = _run(["action", "create", "--type", "host-isolation",
+              "--description", "Isolated host-01", "--claim", claim_id,
+              "--subject-id", subject_id], home)
+    action_id = next(part for part in r.output.split() if part.startswith("ACT-"))
+    r = _run(["decision", "create", "--type", "authorize-recovery",
+              "--statement", "Authorize recovery", "--rationale", "Containment complete",
+              "--decided-by", "lead", "--action", action_id,
+              "--claim", claim_id, "--subject-id", subject_id], home)
+    decision_id = next(part for part in r.output.split() if part.startswith("DEC-"))
+
+    r = _run(["graph", "verify"], home)
+    assert r.exit_code == 0, r.output
+    assert "case graph verified" in r.output
+
+    r = _run(["graph", "show"], home)
+    assert r.exit_code == 0, r.output
+    assert "CASE GRAPH" in r.output
+    assert "RELATIONSHIPS" in r.output
+
+    r = _run(["graph", "show", "--format", "json"], home)
+    assert r.exit_code == 0, r.output
+    data = json.loads(r.output)
+    assert data["summary"]["subject"] == 1
+    assert data["summary"]["decision"] == 1
+    assert any(edge["target"] == f"DECISION:{decision_id}" for edge in data["edges"])
 
 
 def test_lifecycle_contain_and_resolve_flow(tmp_path: Path):
