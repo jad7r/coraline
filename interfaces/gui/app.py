@@ -19,6 +19,7 @@ from core.incident import (
     IncidentWorkspace,
     WorkspaceError,
     SEVERITIES,
+    SUBJECT_TYPES,
     default_actor,
 )
 from core.evidence.hashing import sha256_bytes
@@ -70,6 +71,7 @@ ACTION_COLOR = {
     "action-status-updated": OK,
     "action-outcome-updated": "#a78bfa",
     "action-cancelled": BAD,
+    "subject-created": ACCENT,
     "lifecycle-transition": OK,
     "report-generated": "#a78bfa",
     "incident-closed": MUTED,
@@ -128,7 +130,10 @@ def row_html(title: str, body: str, color: str = LINE, meta: str = "") -> str:
 
 
 def gate_trust(gates) -> tuple[bool, str]:
-    trust_keys = {"custody", "signature", "audit", "storage", "observations", "claims", "actions"}
+    trust_keys = {
+        "custody", "signature", "audit", "storage", "subjects",
+        "observations", "claims", "actions",
+    }
     relevant = [g for g in gates if g.key in trust_keys]
     ok = all(g.passed for g in relevant)
     return ok, "Integrity verified" if ok else "Integrity issue detected"
@@ -187,7 +192,7 @@ def render_sidebar() -> str:
     st.sidebar.markdown("---")
     nav = st.sidebar.radio(
         "Workspace",
-        ("Overview", "Evidence", "Observations", "Claims", "Actions", "Timeline", "Reports"),
+        ("Overview", "Evidence", "Subjects", "Observations", "Claims", "Actions", "Timeline", "Reports"),
         key="workspace_nav",
     )
     st.sidebar.markdown("---")
@@ -269,7 +274,7 @@ def render_overview(ws: IncidentWorkspace) -> None:
     st.markdown('<div class="section-title">Incident Overview</div>', unsafe_allow_html=True)
     c1, c2, c3, c4 = st.columns(4)
     c1.metric("Evidence", state.get("evidence_count", 0))
-    c2.metric("Observations", state.get("observation_count", 0))
+    c2.metric("Subjects", state.get("subject_count", 0))
     c3.metric("Claims", state.get("claim_count", 0))
     c4.metric("Actions", state.get("action_count", 0))
 
@@ -327,7 +332,7 @@ def render_overview(ws: IncidentWorkspace) -> None:
             meta = f"#{entry.seq} · {entry.timestamp[:19].replace('T', ' ')}Z · {entry.actor}"
             detail = ", ".join(
                 f"{k}={str(v)[:32]}" for k, v in entry.detail.items()
-                if k in ("severity", "title", "file", "note", "sha256", "observation_id", "claim_id", "action_id", "amendment_id")
+                if k in ("severity", "title", "file", "note", "sha256", "subject_id", "observation_id", "claim_id", "action_id", "amendment_id")
             )
             st.markdown(row_html(entry.action, escape(detail), color=color, meta=meta),
                         unsafe_allow_html=True)
@@ -386,10 +391,68 @@ def render_evidence(ws: IncidentWorkspace) -> None:
     st.dataframe(rows, use_container_width=True, hide_index=True)
 
 
+def render_subjects(ws: IncidentWorkspace) -> None:
+    st.markdown('<div class="section-title">Subjects</div>', unsafe_allow_html=True)
+    with st.form("subject", clear_on_submit=True):
+        c1, c2 = st.columns([.8, 1.2])
+        subject_type = c1.selectbox("Subject type", SUBJECT_TYPES, disabled=ws.is_closed)
+        value = c2.text_input(
+            "Identity value",
+            placeholder="user@example.com, 203.0.113.10, host-01, prod-api",
+            disabled=ws.is_closed,
+        )
+        display_name = st.text_input("Display name", disabled=ws.is_closed)
+        description = st.text_area("Description", height=80, disabled=ws.is_closed)
+        if st.form_submit_button("Create subject", type="primary", disabled=ws.is_closed):
+            try:
+                ws.create_subject(
+                    subject_type=subject_type,
+                    value=value,
+                    display_name=display_name,
+                    description=description,
+                    actor=ACTOR,
+                )
+                st.rerun()
+            except WorkspaceError as exc:
+                st.error(str(exc))
+
+    subjects = ws.subjects()
+    if not subjects:
+        st.info("No subjects recorded yet.")
+        return
+
+    st.markdown('<div class="band"></div>', unsafe_allow_html=True)
+    observations = ws.observations()
+    claims = ws.claims()
+    actions = ws.actions()
+    for subject in subjects:
+        related_obs = [obs.observation_id for obs in observations if subject.subject_id in obs.subjects]
+        related_claims = [claim.claim_id for claim in claims if subject.subject_id in claim.subjects]
+        related_actions = [action.action_id for action in actions if subject.subject_id in action.subjects]
+        related = related_obs + related_claims + related_actions
+        display = subject.display_name or subject.value
+        meta = f"{subject.subject_type} · created {subject.created_at[:19].replace('T', ' ')}Z by {subject.created_by}"
+        body = (
+            f"{escape(display)}<br>"
+            f"<span class=\"mono\">value {escape(subject.value)}</span><br>"
+            f"<span class=\"mono\">related {escape(', '.join(related) or 'none')}</span>"
+        )
+        if subject.description:
+            body += f"<br>{escape(subject.description)}"
+        st.markdown(row_html(subject.subject_id, body, color=ACCENT, meta=meta),
+                    unsafe_allow_html=True)
+
+
 def render_observations(ws: IncidentWorkspace) -> None:
     st.markdown('<div class="section-title">Observations</div>', unsafe_allow_html=True)
     items = ws.evidence_items()
     evidence_options = [item.sha256 for item in items]
+    subjects = ws.subjects()
+    subject_options = [subject.subject_id for subject in subjects]
+    subject_labels = {
+        subject.subject_id: f"{subject.subject_id} - {subject.subject_type} - {subject.display_name or subject.value}"
+        for subject in subjects
+    }
     with st.form("observation", clear_on_submit=True):
         text = st.text_area(
             "What was observed?",
@@ -410,10 +473,17 @@ def render_observations(ws: IncidentWorkspace) -> None:
             disabled=ws.is_closed,
         )
         subject = st.text_input("Subject/system", placeholder="prod-db, user@example.com, host-01", disabled=ws.is_closed)
+        subject_refs = st.multiselect(
+            "Subject IDs",
+            subject_options,
+            format_func=lambda sid: subject_labels.get(sid, sid),
+            disabled=ws.is_closed,
+        )
         if st.form_submit_button("Record observation", type="primary", disabled=ws.is_closed):
             try:
                 ws.add_observation(text=text, actor=ACTOR, evidence_refs=list(evidence),
-                                   disposition=disposition, subject=subject)
+                                   disposition=disposition, subject=subject,
+                                   subject_refs=list(subject_refs))
                 st.rerun()
             except WorkspaceError as exc:
                 st.error(str(exc))
@@ -428,8 +498,9 @@ def render_observations(ws: IncidentWorkspace) -> None:
         effective = ws.effective_observation(obs.observation_id)
         color = BAD if effective.current_status == "RETRACTED" else "#c084fc"
         subject = f" · {obs.subject}" if obs.subject else ""
+        subject_ids = f" · {', '.join(obs.subjects)}" if obs.subjects else ""
         meta = (
-            f"{effective.current_status}{subject} · created {obs.created_at[:19].replace('T', ' ')}Z "
+            f"{effective.current_status}{subject}{subject_ids} · created {obs.created_at[:19].replace('T', ' ')}Z "
             f"by {obs.creator}"
         )
         evidence = ", ".join(short_hash(h, 12) for h in obs.evidence) or "no evidence"
@@ -474,6 +545,12 @@ def render_observations(ws: IncidentWorkspace) -> None:
 
 def render_claims(ws: IncidentWorkspace) -> None:
     st.markdown('<div class="section-title">Claims</div>', unsafe_allow_html=True)
+    subjects = ws.subjects()
+    subject_options = [subject.subject_id for subject in subjects]
+    subject_labels = {
+        subject.subject_id: f"{subject.subject_id} - {subject.subject_type} - {subject.display_name or subject.value}"
+        for subject in subjects
+    }
     effective_observations = [
         ws.effective_observation(obs.observation_id)
         for obs in ws.observations()
@@ -506,6 +583,12 @@ def render_claims(ws: IncidentWorkspace) -> None:
         status = c2.selectbox("Status", CLAIM_STATUSES, disabled=ws.is_closed or not active_observations)
         subject = st.text_input("Subject/system", placeholder="prod-db, user@example.com, host-01",
                                 disabled=ws.is_closed or not active_observations)
+        subject_refs = st.multiselect(
+            "Subject IDs",
+            subject_options,
+            format_func=lambda sid: subject_labels.get(sid, sid),
+            disabled=ws.is_closed or not active_observations,
+        )
         if st.form_submit_button("Record claim", type="primary", disabled=ws.is_closed or not active_observations):
             try:
                 ws.add_claim(
@@ -514,6 +597,7 @@ def render_claims(ws: IncidentWorkspace) -> None:
                     observation_refs=list(observations),
                     status=status,
                     subject=subject,
+                    subject_refs=list(subject_refs),
                 )
                 st.rerun()
             except WorkspaceError as exc:
@@ -528,8 +612,9 @@ def render_claims(ws: IncidentWorkspace) -> None:
     for claim in claims:
         effective = ws.effective_claim(claim.claim_id)
         subject = f" · {claim.subject}" if claim.subject else ""
+        subject_ids = f" · {', '.join(claim.subjects)}" if claim.subjects else ""
         meta = (
-            f"{effective.current_status}{subject} · created {claim.created_at[:19].replace('T', ' ')}Z "
+            f"{effective.current_status}{subject}{subject_ids} · created {claim.created_at[:19].replace('T', ' ')}Z "
             f"by {claim.creator}"
         )
         refs = ", ".join(claim.observations)
@@ -609,6 +694,12 @@ def render_actions(ws: IncidentWorkspace) -> None:
     claim_options = [claim.claim_id for claim in ws.claims()]
     observation_options = [obs.observation_id for obs in ws.observations()]
     evidence_options = [item.sha256 for item in ws.evidence_items()]
+    subjects = ws.subjects()
+    subject_options = [subject.subject_id for subject in subjects]
+    subject_labels = {
+        subject.subject_id: f"{subject.subject_id} - {subject.subject_type} - {subject.display_name or subject.value}"
+        for subject in subjects
+    }
 
     with st.form("action", clear_on_submit=True):
         action_type = st.text_input(
@@ -626,6 +717,12 @@ def render_actions(ws: IncidentWorkspace) -> None:
         status = c1.selectbox("Status", ACTION_STATUSES, disabled=ws.is_closed)
         subject = c2.text_input("Subject/system", placeholder="user@example.com, host-01, prod-db",
                                 disabled=ws.is_closed)
+        subject_refs = st.multiselect(
+            "Subject IDs",
+            subject_options,
+            format_func=lambda sid: subject_labels.get(sid, sid),
+            disabled=ws.is_closed,
+        )
         claim_refs = st.multiselect("Supporting claims", claim_options, disabled=ws.is_closed)
         observation_refs = st.multiselect("Supporting observations", observation_options, disabled=ws.is_closed)
         evidence_refs = st.multiselect(
@@ -647,6 +744,7 @@ def render_actions(ws: IncidentWorkspace) -> None:
                     observation_refs=list(observation_refs),
                     evidence_refs=list(evidence_refs),
                     outcome=outcome,
+                    subject_refs=list(subject_refs),
                 )
                 st.rerun()
             except WorkspaceError as exc:
@@ -661,13 +759,14 @@ def render_actions(ws: IncidentWorkspace) -> None:
     for action in actions:
         effective = ws.effective_action(action.action_id)
         subject = f" · {action.subject}" if action.subject else ""
+        subject_ids = f" · {', '.join(action.subjects)}" if action.subjects else ""
         refs = []
         refs.extend(action.claims)
         refs.extend(action.observations)
         refs.extend(short_hash(sha, 12) for sha in action.evidence)
         refs_text = ", ".join(refs) or "no references"
         meta = (
-            f"{effective.current_status} · {action.action_type}{subject} · "
+            f"{effective.current_status} · {action.action_type}{subject}{subject_ids} · "
             f"created {action.created_at[:19].replace('T', ' ')}Z by {action.actor}"
         )
         st.markdown(
@@ -826,6 +925,8 @@ with main_col:
         render_overview(ws)
     elif nav == "Evidence":
         render_evidence(ws)
+    elif nav == "Subjects":
+        render_subjects(ws)
     elif nav == "Observations":
         render_observations(ws)
     elif nav == "Claims":

@@ -512,6 +512,127 @@ def test_verify_audit_helper_on_clean_chain(home: Path):
     assert ok and bad is None
 
 
+# ---- subjects --------------------------------------------------------------- #
+
+def test_create_subject_is_immutable_audited_and_verifiable(home: Path):
+    ws = _declare(home)
+
+    subject = ws.create_subject(
+        subject_type="host",
+        value="host-01",
+        display_name="Compromised workstation",
+        description="Initial infected endpoint",
+        actor="analyst@example.com",
+        metadata={"source": "edr", "critical": True},
+    )
+
+    assert subject.subject_id.startswith("SUB-")
+    assert subject.incident_id == ws.incident_id
+    assert subject.subject_type == "HOST"
+    assert subject.value == "host-01"
+    assert ws.subject(subject.subject_id) == subject
+    assert ws.list_subjects() == [subject]
+    assert ws.verify()["subjects"] is True
+    entry = ws.audit_entries()[-1]
+    assert entry.action == "subject-created"
+    assert entry.actor == "analyst@example.com"
+    assert entry.detail["subject_id"] == subject.subject_id
+    assert entry.detail["record_hash"] == subject.record_hash()
+    assert entry.detail["value_hash"] == subject.value_hash()
+
+
+def test_subject_rejects_invalid_duplicate_and_closed_incident(home: Path):
+    ws = _declare(home)
+
+    with pytest.raises(WorkspaceError, match="invalid subject type"):
+        ws.create_subject("ASSET", "host-01", actor="a")
+    with pytest.raises(WorkspaceError, match="subject value must not be empty"):
+        ws.create_subject("HOST", "   ", actor="a")
+    with pytest.raises(WorkspaceError, match="metadata value"):
+        ws.create_subject("HOST", "host-01", actor="a", metadata={"nested": {"x": "y"}})
+
+    ws.create_subject("HOST", "host-01", actor="a")
+    with pytest.raises(WorkspaceError, match="subject already exists"):
+        ws.create_subject("HOST", "host-01", actor="a")
+
+    ws.close_incident(actor="a", force=True, reason="subject lock test")
+    with pytest.raises(WorkspaceError, match="subjects are locked"):
+        ws.create_subject("HOST", "host-02", actor="a")
+
+
+def test_subject_refs_on_observation_claim_and_action_are_verified(home: Path):
+    ws = _declare(home)
+    subject = ws.create_subject("HOST", "host-01", actor="a")
+    obs = ws.add_observation("EDR shows unusual process", actor="a",
+                             subject_refs=[subject.subject_id])
+    claim = ws.add_claim("Host executed unusual process", actor="a",
+                         observation_refs=[obs.observation_id],
+                         subject_refs=[subject.subject_id])
+    action = ws.create_action(
+        "host-isolation",
+        "Isolated host-01",
+        actor="a",
+        observation_refs=[obs.observation_id],
+        claim_refs=[claim.claim_id],
+        subject_refs=[subject.subject_id],
+    )
+
+    assert obs.subjects == (subject.subject_id,)
+    assert claim.subjects == (subject.subject_id,)
+    assert action.subjects == (subject.subject_id,)
+    v = ws.verify()
+    assert v["subjects"] is True
+    assert v["observations"] is True
+    assert v["claims"] is True
+    assert v["actions"] is True
+
+
+def test_subject_ref_rejects_nonexistent_path_and_foreign_incident(home: Path):
+    ws = _declare(home)
+    foreign = IncidentWorkspace.declare(home, title="foreign", severity="SEV3", actor="a")
+    foreign_subject = foreign.create_subject("HOST", "foreign-host", actor="a")
+
+    with pytest.raises(WorkspaceError, match="subject not found"):
+        ws.add_observation("x", actor="a", subject_refs=[foreign_subject.subject_id])
+    with pytest.raises(WorkspaceError, match="invalid subject reference"):
+        ws.add_observation("x", actor="a", subject_refs=["../SUB-BAD"])
+
+
+def test_verify_subjects_detects_tampering_and_deleted_subject(home: Path):
+    ws = _declare(home)
+    subject = ws.create_subject("EMAIL", "user@example.com", actor="a")
+
+    data = json.loads(ws._subjects_path.read_text(encoding="utf-8"))
+    data["subjects"][0]["value"] = "attacker@example.com"
+    ws._subjects_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["subjects"] is False
+    assert any(subject.subject_id in err for err in v["subject_errors"])
+
+    data["subjects"] = []
+    ws._subjects_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+    v = ws.verify()
+    assert v["subjects"] is False
+    assert any("audit event has no subject record" in err for err in v["subject_errors"])
+
+
+def test_verify_detects_deleted_subject_referenced_by_records(home: Path):
+    ws = _declare(home)
+    subject = ws.create_subject("HOST", "host-01", actor="a")
+    obs = ws.add_observation("Observation with subject", actor="a",
+                             subject_refs=[subject.subject_id])
+
+    data = json.loads(ws._subjects_path.read_text(encoding="utf-8"))
+    data["subjects"] = []
+    ws._subjects_path.write_text(json.dumps(data, sort_keys=True), encoding="utf-8")
+
+    v = ws.verify()
+    assert v["observations"] is False
+    assert any(f"{obs.observation_id}: missing subject {subject.subject_id}" in err
+               for err in v["observation_errors"])
+
+
 # ---- claims ----------------------------------------------------------------- #
 
 def test_add_claim_references_observations_and_audits(home: Path):

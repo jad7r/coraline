@@ -20,7 +20,8 @@ def test_help_lists_all_commands():
     assert res.exit_code == 0
     for cmd in (
         "declare", "doctor", "evidence", "timeline", "status", "report",
-        "use", "close", "verify", "registry", "lifecycle", "observe", "claim", "action",
+        "use", "close", "verify", "registry", "lifecycle", "observe", "claim",
+        "action", "subject",
     ):
         assert cmd in res.output
 
@@ -292,6 +293,66 @@ def test_claim_add_list_show_and_rejects_bad_observation(tmp_path: Path):
     assert "claim-corrected" in r.output
     assert "claim-status-updated" in r.output
     assert "claim-withdrawn" in r.output
+
+
+def test_subject_create_list_show_and_use_in_records(tmp_path: Path):
+    home = tmp_path / "incidents"
+
+    r = _run(["declare", "--title", "Endpoint compromise", "--severity", "SEV2"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run([
+        "subject", "create",
+        "--type", "HOST",
+        "--value", "host-01",
+        "--display-name", "Compromised host",
+        "--description", "EDR alert source",
+    ], home)
+    assert r.exit_code == 0, r.output
+    assert "SUBJECT" in r.output
+    subject_id = next(part for part in r.output.split() if part.startswith("SUB-"))
+
+    r = _run(["subject", "list"], home)
+    assert r.exit_code == 0, r.output
+    assert subject_id in r.output
+    assert "host-01" in r.output
+
+    r = _run(["subject", "show", subject_id], home)
+    assert r.exit_code == 0, r.output
+    assert "Compromised host" in r.output
+
+    r = _run([
+        "observe", "add",
+        "--text", "EDR shows unusual process execution",
+        "--subject-id", subject_id,
+    ], home)
+    assert r.exit_code == 0, r.output
+    obs_id = next(part for part in r.output.split() if part.startswith("OBS-"))
+
+    r = _run([
+        "claim", "add",
+        "--text", "Host executed malware",
+        "--observation", obs_id,
+        "--subject-id", subject_id,
+    ], home)
+    assert r.exit_code == 0, r.output
+    claim_id = next(part for part in r.output.split() if part.startswith("CLM-"))
+
+    r = _run([
+        "action", "create",
+        "--type", "host-isolation",
+        "--description", "Isolated host-01",
+        "--claim", claim_id,
+        "--subject-id", subject_id,
+    ], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["verify"], home)
+    assert r.exit_code == 0, r.output
+
+    r = _run(["subject", "create", "--type", "HOST", "--value", "host-01"], home)
+    assert r.exit_code == 1
+    assert "subject already exists" in r.output
 
 
 def test_action_create_list_show_and_amendment_flow(tmp_path: Path):

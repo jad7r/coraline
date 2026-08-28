@@ -56,6 +56,11 @@ CLAIM_STATUSES = ("ASSERTED", "SUPPORTED", "REFUTED", "INCONCLUSIVE")
 CLAIM_AMENDMENT_TYPES = ("CORRECTION", "STATUS", "WITHDRAWAL")
 ACTION_STATUSES = ("PLANNED", "INITIATED", "COMPLETED", "FAILED", "CANCELLED")
 ACTION_AMENDMENT_TYPES = ("CORRECTION", "STATUS", "OUTCOME", "CANCELLATION")
+SUBJECT_TYPES = (
+    "USER", "EMAIL", "IP_ADDRESS", "HOST", "DEVICE", "SERVICE", "APPLICATION",
+    "CLOUD_ACCOUNT", "CREDENTIAL", "DOMAIN", "URL", "FILE", "MALWARE",
+    "PROCESS", "CONTAINER", "WORKLOAD", "OTHER",
+)
 SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 SHA256_PREFIX_RE = re.compile(r"^[0-9a-f]{12,63}$")
 
@@ -162,6 +167,58 @@ class Gate:
 
 
 @dataclass(frozen=True)
+class Subject:
+    """One immutable investigated entity within an incident."""
+
+    subject_id: str
+    incident_id: str
+    subject_type: str
+    value: str
+    created_at: str
+    created_by: str
+    display_name: Optional[str] = None
+    description: Optional[str] = None
+    metadata: Dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> Dict[str, Any]:
+        d: Dict[str, Any] = {
+            "subject_id": self.subject_id,
+            "incident_id": self.incident_id,
+            "subject_type": self.subject_type,
+            "value": self.value,
+            "created_at": self.created_at,
+            "created_by": self.created_by,
+        }
+        if self.display_name:
+            d["display_name"] = self.display_name
+        if self.description:
+            d["description"] = self.description
+        if self.metadata:
+            d["metadata"] = dict(sorted(self.metadata.items()))
+        return d
+
+    @classmethod
+    def from_dict(cls, d: Dict[str, Any]) -> "Subject":
+        return cls(
+            subject_id=str(d["subject_id"]),
+            incident_id=str(d["incident_id"]),
+            subject_type=str(d["subject_type"]).upper(),
+            value=str(d["value"]),
+            created_at=str(d["created_at"]),
+            created_by=str(d["created_by"]),
+            display_name=str(d["display_name"]) if d.get("display_name") else None,
+            description=str(d["description"]) if d.get("description") else None,
+            metadata=dict(d.get("metadata", {})),
+        )
+
+    def value_hash(self) -> str:
+        return sha256_bytes(self.value.encode("utf-8"))
+
+    def record_hash(self) -> str:
+        return sha256_bytes(canonical_json(self.to_dict()).encode("utf-8"))
+
+
+@dataclass(frozen=True)
 class Observation:
     """One immutable investigative observation linked to incident evidence hashes."""
 
@@ -173,6 +230,7 @@ class Observation:
     disposition: str = "OBSERVED"
     evidence: Tuple[str, ...] = ()
     subject: Optional[str] = None
+    subjects: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
@@ -186,6 +244,8 @@ class Observation:
         }
         if self.subject:
             d["subject"] = self.subject
+        if self.subjects:
+            d["subjects"] = list(self.subjects)
         return d
 
     @classmethod
@@ -199,6 +259,7 @@ class Observation:
             disposition=str(d.get("disposition", "OBSERVED")).upper(),
             evidence=tuple(str(e).lower() for e in d.get("evidence", [])),
             subject=str(d["subject"]) if d.get("subject") else None,
+            subjects=tuple(str(s) for s in d.get("subjects", [])),
         )
 
     def text_hash(self) -> str:
@@ -282,6 +343,7 @@ class Claim:
     status: str = "ASSERTED"
     observations: Tuple[str, ...] = ()
     subject: Optional[str] = None
+    subjects: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
@@ -295,6 +357,8 @@ class Claim:
         }
         if self.subject:
             d["subject"] = self.subject
+        if self.subjects:
+            d["subjects"] = list(self.subjects)
         return d
 
     @classmethod
@@ -308,6 +372,7 @@ class Claim:
             status=str(d.get("status", "ASSERTED")).upper(),
             observations=tuple(str(o) for o in d.get("observations", [])),
             subject=str(d["subject"]) if d.get("subject") else None,
+            subjects=tuple(str(s) for s in d.get("subjects", [])),
         )
 
     def text_hash(self) -> str:
@@ -400,6 +465,7 @@ class Action:
     claims: Tuple[str, ...] = ()
     evidence: Tuple[str, ...] = ()
     outcome: Optional[str] = None
+    subjects: Tuple[str, ...] = ()
 
     def to_dict(self) -> Dict[str, Any]:
         d: Dict[str, Any] = {
@@ -418,6 +484,8 @@ class Action:
             d["subject"] = self.subject
         if self.outcome:
             d["outcome"] = self.outcome
+        if self.subjects:
+            d["subjects"] = list(self.subjects)
         return d
 
     @classmethod
@@ -435,6 +503,7 @@ class Action:
             claims=tuple(str(c) for c in d.get("claims", [])),
             evidence=tuple(str(e).lower() for e in d.get("evidence", [])),
             outcome=str(d["outcome"]) if d.get("outcome") else None,
+            subjects=tuple(str(s) for s in d.get("subjects", [])),
         )
 
     def description_hash(self) -> str:
@@ -562,6 +631,10 @@ class IncidentWorkspace:
     @property
     def _actions_path(self) -> Path:
         return self.dir / "actions.json"
+
+    @property
+    def _subjects_path(self) -> Path:
+        return self.dir / "subjects.json"
 
     @property
     def _sig_path(self) -> Path:
@@ -1030,6 +1103,191 @@ class IncidentWorkspace:
         """SHA-256s already in the manifest — used to make uploads idempotent."""
         return {it.sha256 for it in self._load_manifest().items}
 
+    # -- subjects ------------------------------------------------------------- #
+    def _load_subjects(self) -> List[Subject]:
+        if not self._subjects_path.exists():
+            return []
+        data = json.loads(self._subjects_path.read_text(encoding="utf-8"))
+        subjects = [Subject.from_dict(d) for d in data.get("subjects", [])]
+        return sorted(subjects, key=lambda s: (s.created_at, s.subject_id))
+
+    def _save_subjects(self, subjects: List[Subject]) -> None:
+        ordered = sorted(subjects, key=lambda s: (s.created_at, s.subject_id))
+        payload = {
+            "version": "1",
+            "incident_id": self.incident_id,
+            "subjects": [s.to_dict() for s in ordered],
+        }
+        self._write_text_atomic(
+            self._subjects_path,
+            json.dumps(payload, indent=2, sort_keys=True),
+        )
+
+    def _clean_subject_metadata(self, metadata: Optional[Dict[str, Any]]) -> Dict[str, Any]:
+        if not metadata:
+            return {}
+        clean: Dict[str, Any] = {}
+        for key, value in metadata.items():
+            k = str(key).strip()
+            if not k:
+                raise WorkspaceError("subject metadata keys must not be empty")
+            if isinstance(value, (dict, list, tuple, set)):
+                raise WorkspaceError(f"subject metadata value for {k!r} must be scalar")
+            if value is not None and not isinstance(value, (str, int, float, bool)):
+                raise WorkspaceError(f"subject metadata value for {k!r} must be scalar")
+            clean[k] = value
+        return dict(sorted(clean.items()))
+
+    def subjects(self) -> List[Subject]:
+        return self._load_subjects()
+
+    def list_subjects(self) -> List[Subject]:
+        return self.subjects()
+
+    def subject(self, subject_id: str) -> Subject:
+        for subject in self._load_subjects():
+            if subject.subject_id == subject_id:
+                return subject
+        raise WorkspaceError(f"subject not found: {subject_id}")
+
+    def get_subject(self, subject_id: str) -> Subject:
+        return self.subject(subject_id)
+
+    def _resolve_subject_ref(self, ref: str) -> str:
+        value = ref.strip()
+        if not value:
+            raise WorkspaceError("subject reference must not be empty")
+        if "/" in value or "\\" in value:
+            raise WorkspaceError(f"invalid subject reference: {ref}")
+        subjects = {subject.subject_id for subject in self._load_subjects()}
+        if value in subjects:
+            return value
+        raise WorkspaceError(f"subject not found in incident: {ref}")
+
+    def _resolve_subject_refs(self, refs: Optional[List[str]]) -> Tuple[str, ...]:
+        return tuple(sorted({self._resolve_subject_ref(ref) for ref in (refs or [])}))
+
+    @locked_mutation
+    def create_subject(
+        self,
+        subject_type: str,
+        value: str,
+        actor: str,
+        display_name: Optional[str] = None,
+        description: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        when: Optional[datetime] = None,
+    ) -> Subject:
+        if self.is_closed:
+            raise WorkspaceError(
+                f"incident {self.incident_id} is {canonical_status(self.state.get('status')).lower()}; "
+                "subjects are locked"
+            )
+        clean_type = subject_type.strip().upper()
+        if clean_type not in SUBJECT_TYPES:
+            raise WorkspaceError(
+                f"invalid subject type {clean_type!r}; choose one of {', '.join(SUBJECT_TYPES)}"
+            )
+        clean_value = value.strip()
+        if not clean_value:
+            raise WorkspaceError("subject value must not be empty")
+        clean_display = display_name.strip() if display_name and display_name.strip() else None
+        clean_description = description.strip() if description and description.strip() else None
+        clean_metadata = self._clean_subject_metadata(metadata)
+        existing = self._load_subjects()
+        if any(s.subject_type == clean_type and s.value == clean_value for s in existing):
+            raise WorkspaceError(f"subject already exists: {clean_type} {clean_value}")
+        when = when or _now()
+        subject = Subject(
+            subject_id=f"SUB-{uuid.uuid4().hex[:12].upper()}",
+            incident_id=self.incident_id,
+            subject_type=clean_type,
+            value=clean_value,
+            display_name=clean_display,
+            description=clean_description,
+            created_at=to_iso(when),
+            created_by=actor,
+            metadata=clean_metadata,
+        )
+        if any(s.subject_id == subject.subject_id for s in existing):
+            raise WorkspaceError(f"duplicate subject id generated: {subject.subject_id}")
+        self._save_subjects(existing + [subject])
+        self.state["subject_count"] = len(existing) + 1
+        self.state["updated_at"] = to_iso(when)
+        self._save_state()
+        self._append_audit(
+            actor,
+            "subject-created",
+            {
+                "subject_id": subject.subject_id,
+                "incident_id": self.incident_id,
+                "subject_type": subject.subject_type,
+                "created_at": subject.created_at,
+                "created_by": subject.created_by,
+                "record_hash": subject.record_hash(),
+                "value_hash": subject.value_hash(),
+            },
+            when,
+        )
+        return subject
+
+    def verify_subjects(self) -> Tuple[bool, List[str]]:
+        errors: List[str] = []
+        try:
+            subjects = self._load_subjects()
+        except Exception as exc:
+            return False, [f"subjects unreadable: {exc}"]
+        audits = self._load_audit()
+        subject_events = [
+            e for e in audits
+            if e.action == "subject-created"
+            and e.detail.get("incident_id") == self.incident_id
+        ]
+        subjects_by_id = {subject.subject_id: subject for subject in subjects}
+        seen_ids = set()
+        seen_identity = set()
+        for subject in subjects:
+            if subject.subject_id in seen_ids:
+                errors.append(f"{subject.subject_id}: duplicate subject id")
+            seen_ids.add(subject.subject_id)
+            identity = (subject.subject_type, subject.value)
+            if identity in seen_identity:
+                errors.append(f"{subject.subject_id}: duplicate subject identity")
+            seen_identity.add(identity)
+            if subject.incident_id != self.incident_id:
+                errors.append(f"{subject.subject_id}: incident id mismatch")
+            if subject.subject_type not in SUBJECT_TYPES:
+                errors.append(f"{subject.subject_id}: invalid subject type")
+            if not subject.value.strip():
+                errors.append(f"{subject.subject_id}: empty subject value")
+            try:
+                self._clean_subject_metadata(subject.metadata)
+            except WorkspaceError as exc:
+                errors.append(f"{subject.subject_id}: {exc}")
+            matching_audit = any(
+                e.action == "subject-created"
+                and e.detail.get("subject_id") == subject.subject_id
+                and e.detail.get("incident_id") == self.incident_id
+                and e.actor == subject.created_by
+                and e.timestamp == subject.created_at
+                and e.detail.get("subject_type") == subject.subject_type
+                and e.detail.get("created_by") == subject.created_by
+                and e.detail.get("created_at") == subject.created_at
+                and e.detail.get("record_hash") == subject.record_hash()
+                and e.detail.get("value_hash") == subject.value_hash()
+                for e in subject_events
+            )
+            if not matching_audit:
+                errors.append(f"{subject.subject_id}: missing matching audit event")
+        for event in subject_events:
+            subject_id = event.detail.get("subject_id")
+            subject = subjects_by_id.get(subject_id)
+            if subject is None:
+                errors.append(f"{subject_id}: audit event has no subject record")
+            elif event.detail.get("record_hash") != subject.record_hash():
+                errors.append(f"{subject_id}: audit event hash mismatch")
+        return not errors, errors
+
     # -- observations ---------------------------------------------------------- #
     def _load_observation_store(self) -> Tuple[List[Observation], List[ObservationAmendment]]:
         if not self._observations_path.exists():
@@ -1151,6 +1409,7 @@ class IncidentWorkspace:
         evidence_refs: Optional[List[str]] = None,
         disposition: str = "OBSERVED",
         subject: Optional[str] = None,
+        subject_refs: Optional[List[str]] = None,
         when: Optional[datetime] = None,
     ) -> Observation:
         if self.is_closed:
@@ -1170,6 +1429,7 @@ class IncidentWorkspace:
         evidence = tuple(
             sorted({self._resolve_evidence_ref(ref) for ref in (evidence_refs or [])})
         )
+        subjects = self._resolve_subject_refs(subject_refs)
         when = when or _now()
         observation_id = f"OBS-{uuid.uuid4().hex[:12].upper()}"
         existing = self._load_observations()
@@ -1184,6 +1444,7 @@ class IncidentWorkspace:
             disposition=disposition,
             evidence=evidence,
             subject=subject.strip() if subject and subject.strip() else None,
+            subjects=subjects,
         )
         self._save_observations(existing + [obs])
         self.state["observation_count"] = len(existing) + 1
@@ -1200,6 +1461,7 @@ class IncidentWorkspace:
                 "disposition": obs.disposition,
                 "evidence": list(obs.evidence),
                 "subject": obs.subject,
+                "subjects": list(obs.subjects),
                 "record_hash": obs.record_hash(),
                 "text_hash": obs.text_hash(),
                 "text": obs.text,
@@ -1330,8 +1592,9 @@ class IncidentWorkspace:
         seen = set()
         try:
             evidence_shas = self.evidence_shas()
+            subject_ids = {subject.subject_id for subject in self._load_subjects()}
         except Exception as exc:
-            return False, [f"evidence manifest unreadable: {exc}"]
+            return False, [f"references unreadable for observation verification: {exc}"]
         audits = self._load_audit()
         observation_events = [
             e for e in audits
@@ -1358,6 +1621,9 @@ class IncidentWorkspace:
             for evidence in obs.evidence:
                 if evidence not in evidence_shas:
                     errors.append(f"{obs.observation_id}: missing evidence {evidence}")
+            for subject_id in obs.subjects:
+                if subject_id not in subject_ids:
+                    errors.append(f"{obs.observation_id}: missing subject {subject_id}")
             matching_audit = any(
                 e.action == "observation-created"
                 and e.detail.get("observation_id") == obs.observation_id
@@ -1368,6 +1634,7 @@ class IncidentWorkspace:
                 and e.detail.get("created_at") == obs.created_at
                 and e.detail.get("disposition") == obs.disposition
                 and e.detail.get("subject") == obs.subject
+                and sorted(e.detail.get("subjects", [])) == list(obs.subjects)
                 and e.detail.get("record_hash") == obs.record_hash()
                 and e.detail.get("text_hash") == obs.text_hash()
                 and sorted(e.detail.get("evidence", [])) == list(obs.evidence)
@@ -1558,6 +1825,7 @@ class IncidentWorkspace:
         observation_refs: List[str],
         status: str = "ASSERTED",
         subject: Optional[str] = None,
+        subject_refs: Optional[List[str]] = None,
         when: Optional[datetime] = None,
     ) -> Claim:
         if self.is_closed:
@@ -1581,6 +1849,7 @@ class IncidentWorkspace:
         for observation_id in observations:
             if self.observation_is_retracted(observation_id):
                 raise WorkspaceError(f"claim cannot reference retracted observation: {observation_id}")
+        subjects = self._resolve_subject_refs(subject_refs)
         when = when or _now()
         claim_id = f"CLM-{uuid.uuid4().hex[:12].upper()}"
         existing = self._load_claims()
@@ -1595,6 +1864,7 @@ class IncidentWorkspace:
             status=status,
             observations=observations,
             subject=subject.strip() if subject and subject.strip() else None,
+            subjects=subjects,
         )
         self._save_claims(existing + [claim])
         self.state["claim_count"] = len(existing) + 1
@@ -1611,6 +1881,7 @@ class IncidentWorkspace:
                 "status": claim.status,
                 "observations": list(claim.observations),
                 "subject": claim.subject,
+                "subjects": list(claim.subjects),
                 "record_hash": claim.record_hash(),
                 "text_hash": claim.text_hash(),
                 "text": claim.text,
@@ -1819,6 +2090,7 @@ class IncidentWorkspace:
         amendments_by_id = {amendment.amendment_id: amendment for amendment in amendments}
         try:
             observation_ids = {obs.observation_id for obs in self._load_observations()}
+            subject_ids = {subject.subject_id for subject in self._load_subjects()}
         except Exception as exc:
             return False, [f"observations unreadable for claim verification: {exc}"]
         seen = set()
@@ -1837,6 +2109,9 @@ class IncidentWorkspace:
             for observation_id in claim.observations:
                 if observation_id not in observation_ids:
                     errors.append(f"{claim.claim_id}: missing observation {observation_id}")
+            for subject_id in claim.subjects:
+                if subject_id not in subject_ids:
+                    errors.append(f"{claim.claim_id}: missing subject {subject_id}")
             matching_audit = any(
                 e.action == "claim-created"
                 and e.detail.get("claim_id") == claim.claim_id
@@ -1847,6 +2122,7 @@ class IncidentWorkspace:
                 and e.detail.get("created_at") == claim.created_at
                 and e.detail.get("status") == claim.status
                 and e.detail.get("subject") == claim.subject
+                and sorted(e.detail.get("subjects", [])) == list(claim.subjects)
                 and e.detail.get("record_hash") == claim.record_hash()
                 and e.detail.get("text_hash") == claim.text_hash()
                 and sorted(e.detail.get("observations", [])) == list(claim.observations)
@@ -2092,6 +2368,7 @@ class IncidentWorkspace:
         claim_refs: Optional[List[str]] = None,
         evidence_refs: Optional[List[str]] = None,
         outcome: Optional[str] = None,
+        subject_refs: Optional[List[str]] = None,
         when: Optional[datetime] = None,
     ) -> Action:
         if self.is_closed:
@@ -2113,6 +2390,7 @@ class IncidentWorkspace:
         observations = self._resolve_action_observation_refs(observation_refs)
         claims = self._resolve_action_claim_refs(claim_refs)
         evidence = self._resolve_action_evidence_refs(evidence_refs)
+        subjects = self._resolve_subject_refs(subject_refs)
         when = when or _now()
         action_id = f"ACT-{uuid.uuid4().hex[:12].upper()}"
         existing = self._load_actions()
@@ -2131,6 +2409,7 @@ class IncidentWorkspace:
             claims=claims,
             evidence=evidence,
             outcome=outcome.strip() if outcome and outcome.strip() else None,
+            subjects=subjects,
         )
         self._save_actions(existing + [action])
         self.state["action_count"] = len(existing) + 1
@@ -2147,6 +2426,7 @@ class IncidentWorkspace:
                 "action_type": action.action_type,
                 "status": action.status,
                 "subject": action.subject,
+                "subjects": list(action.subjects),
                 "observations": list(action.observations),
                 "claims": list(action.claims),
                 "evidence": list(action.evidence),
@@ -2436,6 +2716,7 @@ class IncidentWorkspace:
             observation_ids = {obs.observation_id for obs in self._load_observations()}
             claim_ids = {claim.claim_id for claim in self._load_claims()}
             evidence_shas = self.evidence_shas()
+            subject_ids = {subject.subject_id for subject in self._load_subjects()}
         except Exception as exc:
             return False, [f"references unreadable for action verification: {exc}"]
         seen = set()
@@ -2460,6 +2741,9 @@ class IncidentWorkspace:
             for evidence in action.evidence:
                 if evidence not in evidence_shas:
                     errors.append(f"{action.action_id}: missing evidence {evidence}")
+            for subject_id in action.subjects:
+                if subject_id not in subject_ids:
+                    errors.append(f"{action.action_id}: missing subject {subject_id}")
             matching_audit = any(
                 e.action == "action-created"
                 and e.detail.get("action_id") == action.action_id
@@ -2471,6 +2755,7 @@ class IncidentWorkspace:
                 and e.detail.get("action_type") == action.action_type
                 and e.detail.get("status") == action.status
                 and e.detail.get("subject") == action.subject
+                and sorted(e.detail.get("subjects", [])) == list(action.subjects)
                 and e.detail.get("record_hash") == action.record_hash()
                 and e.detail.get("description_hash") == action.description_hash()
                 and e.detail.get("outcome_hash") == action.outcome_hash()
@@ -2690,6 +2975,8 @@ class IncidentWorkspace:
             "storage_missing": [],
             "storage_bad_hash": [],
             "storage_unverifiable": [],
+            "subjects": True,
+            "subject_errors": [],
             "observations": True,
             "observation_errors": [],
             "claims": True,
@@ -2725,6 +3012,9 @@ class IncidentWorkspace:
         ok, bad_seq = verify_audit(self._load_audit())
         result["audit_chain"] = ok
         result["audit_bad_seq"] = bad_seq
+        subjects_ok, subject_errors = self.verify_subjects()
+        result["subjects"] = subjects_ok
+        result["subject_errors"] = subject_errors
         observations_ok, observation_errors = self.verify_observations()
         result["observations"] = observations_ok
         result["observation_errors"] = observation_errors
@@ -2796,6 +3086,9 @@ class IncidentWorkspace:
                  else f"{len(v['storage_missing'])} missing, "
                       f"{len(v['storage_bad_hash'])} bad hash, "
                       f"{len(v['storage_unverifiable'])} unverifiable"),
+            Gate("subjects", "Subjects are immutable and audited", v["subjects"],
+                 "verified" if v["subjects"]
+                 else f"{len(v['subject_errors'])} issue(s)"),
             Gate("observations", "Observations reference valid evidence", v["observations"],
                  "verified" if v["observations"]
                  else f"{len(v['observation_errors'])} issue(s)"),
@@ -2862,21 +3155,39 @@ class IncidentWorkspace:
         else:
             lines.append("_No evidence recorded._")
         lines.append("")
+        lines.append("## Subjects")
+        lines.append("")
+        subjects = self.subjects()
+        if subjects:
+            lines.append("| ID | Type | Display name | Value | Description |")
+            lines.append("|----|------|--------------|-------|-------------|")
+            for subject in subjects:
+                display = (subject.display_name or "-").replace("|", "\\|").replace("\n", " ")
+                value = subject.value.replace("|", "\\|").replace("\n", " ")
+                description = (subject.description or "-").replace("|", "\\|").replace("\n", " ")
+                lines.append(
+                    f"| {subject.subject_id} | {subject.subject_type} | {display} | "
+                    f"{value} | {description} |"
+                )
+        else:
+            lines.append("_No subjects recorded._")
+        lines.append("")
         lines.append("## Observations")
         lines.append("")
         observations = self.observations()
         if observations:
-            lines.append("| ID | Current status | Subject | Evidence | Current text | Original text |")
-            lines.append("|----|----------------|---------|----------|--------------|---------------|")
+            lines.append("| ID | Current status | Subject | Subject IDs | Evidence | Current text | Original text |")
+            lines.append("|----|----------------|---------|-------------|----------|--------------|---------------|")
             for obs in observations:
                 effective = self.effective_observation(obs.observation_id)
                 evidence = ", ".join(sha[:16] for sha in obs.evidence) or "-"
                 subject = obs.subject or "-"
+                subject_ids = ", ".join(obs.subjects) or "-"
                 current_text = effective.current_text.replace("|", "\\|").replace("\n", " ")
                 original_text = obs.text.replace("|", "\\|").replace("\n", " ")
                 lines.append(
                     f"| {obs.observation_id} | {effective.current_status} | {subject} | "
-                    f"`{evidence}` | {current_text} | {original_text} |"
+                    f"{subject_ids} | `{evidence}` | {current_text} | {original_text} |"
                 )
         else:
             lines.append("_No observations recorded._")
@@ -2899,17 +3210,18 @@ class IncidentWorkspace:
         lines.append("")
         claims = self.claims()
         if claims:
-            lines.append("| ID | Current status | Subject | Observations | Current claim | Original claim |")
-            lines.append("|----|----------------|---------|--------------|---------------|----------------|")
+            lines.append("| ID | Current status | Subject | Subject IDs | Observations | Current claim | Original claim |")
+            lines.append("|----|----------------|---------|-------------|--------------|---------------|----------------|")
             for claim in claims:
                 effective = self.effective_claim(claim.claim_id)
                 subject = claim.subject or "-"
+                subject_ids = ", ".join(claim.subjects) or "-"
                 refs = ", ".join(claim.observations)
                 current_text = effective.current_text.replace("|", "\\|").replace("\n", " ")
                 original_text = claim.text.replace("|", "\\|").replace("\n", " ")
                 lines.append(
                     f"| {claim.claim_id} | {effective.current_status} | {subject} | "
-                    f"{refs} | {current_text} | {original_text} |"
+                    f"{subject_ids} | {refs} | {current_text} | {original_text} |"
                 )
         else:
             lines.append("_No claims recorded._")
@@ -2934,16 +3246,17 @@ class IncidentWorkspace:
         actions = self.actions()
         if actions:
             lines.append(
-                "| ID | Type | Current status | Subject | Claims | Observations | Evidence | "
+                "| ID | Type | Current status | Subject | Subject IDs | Claims | Observations | Evidence | "
                 "Current action | Original action | Current outcome |"
             )
             lines.append(
-                "|----|------|----------------|---------|--------|--------------|----------|"
+                "|----|------|----------------|---------|-------------|--------|--------------|----------|"
                 "----------------|-----------------|-----------------|"
             )
             for action in actions:
                 effective = self.effective_action(action.action_id)
                 subject = action.subject or "-"
+                subject_ids = ", ".join(action.subjects) or "-"
                 claims = ", ".join(action.claims) or "-"
                 observations = ", ".join(action.observations) or "-"
                 evidence = ", ".join(sha[:16] for sha in action.evidence) or "-"
@@ -2952,7 +3265,7 @@ class IncidentWorkspace:
                 outcome = (effective.current_outcome or "-").replace("|", "\\|").replace("\n", " ")
                 lines.append(
                     f"| {action.action_id} | {action.action_type} | {effective.current_status} | "
-                    f"{subject} | {claims} | {observations} | `{evidence}` | "
+                    f"{subject} | {subject_ids} | {claims} | {observations} | `{evidence}` | "
                     f"{current_description} | {original_description} | {outcome} |"
                 )
         else:

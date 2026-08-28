@@ -42,6 +42,8 @@ from core.incident import (
     OBSERVATION_DISPOSITIONS,
     Observation,
     ObservationAmendment,
+    SUBJECT_TYPES,
+    Subject,
     WorkspaceError,
     SEVERITIES,
     default_actor,
@@ -100,6 +102,7 @@ lifecycle_app = typer.Typer(no_args_is_help=True, help="Incident lifecycle trans
 observe_app = typer.Typer(no_args_is_help=True, help="Investigative observations.")
 claim_app = typer.Typer(no_args_is_help=True, help="Investigative claims.")
 action_app = typer.Typer(no_args_is_help=True, help="Responder actions.")
+subject_app = typer.Typer(no_args_is_help=True, help="Investigative subjects and entities.")
 app.add_typer(evidence_app, name="evidence")
 app.add_typer(timeline_app, name="timeline")
 app.add_typer(registry_app, name="registry")
@@ -107,6 +110,7 @@ app.add_typer(lifecycle_app, name="lifecycle")
 app.add_typer(observe_app, name="observe")
 app.add_typer(claim_app, name="claim")
 app.add_typer(action_app, name="action")
+app.add_typer(subject_app, name="subject")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -145,6 +149,30 @@ def _evidence_refs(evidence: tuple[str, ...]) -> str:
     return ", ".join(sha[:12] + "…" for sha in evidence) if evidence else "none"
 
 
+def _subject_refs(subjects: tuple[str, ...]) -> str:
+    return ", ".join(subjects) if subjects else "none"
+
+
+def _subject_panel(subject: Subject) -> Panel:
+    table = Table.grid(padding=(0, 2))
+    table.add_column(style=C_DIM, justify="right")
+    table.add_column()
+    table.add_row("subject", Text(subject.subject_id, style=C_ACCENT))
+    table.add_row("incident", subject.incident_id)
+    table.add_row("type", subject.subject_type)
+    table.add_row("value", subject.value)
+    table.add_row("created", subject.created_at)
+    table.add_row("created by", subject.created_by)
+    if subject.display_name:
+        table.add_row("display", subject.display_name)
+    if subject.description:
+        table.add_row("description", subject.description)
+    if subject.metadata:
+        table.add_row("metadata", json.dumps(subject.metadata, sort_keys=True))
+    return Panel(table, title="[bold]SUBJECT[/]", border_style="cyan",
+                 box=box.ROUNDED)
+
+
 def _observation_panel(obs: Observation) -> Panel:
     table = Table.grid(padding=(0, 2))
     table.add_column(style=C_DIM, justify="right")
@@ -156,6 +184,8 @@ def _observation_panel(obs: Observation) -> Panel:
     table.add_row("disposition", obs.disposition)
     if obs.subject:
         table.add_row("subject", obs.subject)
+    if obs.subjects:
+        table.add_row("subject ids", _subject_refs(obs.subjects))
     table.add_row("evidence", _evidence_refs(obs.evidence))
     table.add_row("text", obs.text)
     return Panel(table, title="[bold]OBSERVATION[/]", border_style="cyan",
@@ -185,6 +215,8 @@ def _claim_panel(
     table.add_row("status", current_status or claim.status)
     if claim.subject:
         table.add_row("subject", claim.subject)
+    if claim.subjects:
+        table.add_row("subject ids", _subject_refs(claim.subjects))
     table.add_row("observations", _claim_refs(claim.observations))
     table.add_row("text", current_text or claim.text)
     if current_text and current_text != claim.text:
@@ -230,6 +262,8 @@ def _action_panel(
     table.add_row("status", current_status or action.status)
     if action.subject:
         table.add_row("subject", action.subject)
+    if action.subjects:
+        table.add_row("subject ids", _subject_refs(action.subjects))
     table.add_row("claims", _action_refs(action.claims))
     table.add_row("observations", _action_refs(action.observations))
     table.add_row("evidence", _evidence_refs(action.evidence))
@@ -400,6 +434,81 @@ def evidence_add(
 
 # ---- observations ---------------------------------------------------------- #
 
+@subject_app.command("create")
+def subject_create(
+    subject_type: str = typer.Option(..., "--type", "-t", help=f"One of {', '.join(SUBJECT_TYPES)}."),
+    value: str = typer.Option(..., "--value", "-v", help="Subject identity value."),
+    display_name: Optional[str] = typer.Option(None, "--display-name", help="Optional display name."),
+    description: Optional[str] = typer.Option(None, "--description", "-d", help="Optional subject description."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    actor: Optional[str] = typer.Option(None, "--actor"),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Create an immutable investigated subject/entity."""
+    ws = _load(home, incident_id)
+    who = actor or default_actor()
+    try:
+        subject = ws.create_subject(
+            subject_type=subject_type,
+            value=value,
+            actor=who,
+            display_name=display_name,
+            description=description,
+        )
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(_subject_panel(subject))
+
+
+@subject_app.command("list")
+def subject_list(
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """List subjects for an incident."""
+    ws = _load(home, incident_id)
+    subjects = ws.subjects()
+    table = Table(
+        title=f"[bold]SUBJECTS[/]  {ws.incident_id}",
+        box=box.SIMPLE_HEAVY,
+        header_style=C_ACCENT,
+        border_style="cyan",
+        pad_edge=False,
+    )
+    table.add_column("id", style=C_ACCENT, no_wrap=True)
+    table.add_column("type", no_wrap=True)
+    table.add_column("value", overflow="fold", ratio=1)
+    table.add_column("display", overflow="fold", ratio=1)
+    table.add_column("created", style=C_DIM, no_wrap=True)
+    for subject in subjects:
+        table.add_row(
+            subject.subject_id,
+            subject.subject_type,
+            subject.value,
+            subject.display_name or "",
+            subject.created_at.replace("T", " ")[:19],
+        )
+    console.print(table)
+    console.print(f"[{C_DIM}]{len(subjects)} subject(s)[/]")
+
+
+@subject_app.command("show")
+def subject_show(
+    subject_id: str = typer.Argument(..., help="Subject ID."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Show one subject."""
+    ws = _load(home, incident_id)
+    try:
+        subject = ws.subject(subject_id)
+    except WorkspaceError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    console.print(_subject_panel(subject))
+
+
 @observe_app.command("add")
 def observe_add(
     text: str = typer.Option(..., "--text", "-t", help="Observation text."),
@@ -417,6 +526,7 @@ def observe_add(
     ),
     subject: Optional[str] = typer.Option(None, "--subject", "-s",
                                           help="Optional investigated subject."),
+    subject_id: Optional[List[str]] = typer.Option(None, "--subject-id", help="Explicit subject ID."),
     incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
     actor: Optional[str] = typer.Option(None, "--actor"),
     home: Optional[str] = typer.Option(None, "--home"),
@@ -431,6 +541,7 @@ def observe_add(
             evidence_refs=evidence or [],
             disposition=disposition,
             subject=subject,
+            subject_refs=subject_id or [],
         )
     except WorkspaceError as e:
         console.print(f"[{C_BAD}]✗ {e}[/]")
@@ -560,6 +671,7 @@ def claim_add(
         help=f"One of {', '.join(CLAIM_STATUSES)}.",
     ),
     subject: Optional[str] = typer.Option(None, "--subject", help="Optional investigated subject."),
+    subject_id: Optional[List[str]] = typer.Option(None, "--subject-id", help="Explicit subject ID."),
     incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
     actor: Optional[str] = typer.Option(None, "--actor"),
     home: Optional[str] = typer.Option(None, "--home"),
@@ -574,6 +686,7 @@ def claim_add(
             observation_refs=observation,
             status=status,
             subject=subject,
+            subject_refs=subject_id or [],
         )
     except WorkspaceError as e:
         console.print(f"[{C_BAD}]✗ {e}[/]")
@@ -715,6 +828,7 @@ def action_create(
     description: str = typer.Option(..., "--description", "-d", help="What the responder did or plans to do."),
     status: str = typer.Option("PLANNED", "--status", "-s", help=f"One of {', '.join(ACTION_STATUSES)}."),
     subject: Optional[str] = typer.Option(None, "--subject", help="Optional affected user, host, system, or account."),
+    subject_id: Optional[List[str]] = typer.Option(None, "--subject-id", help="Explicit subject ID."),
     claim: Optional[List[str]] = typer.Option(None, "--claim", "-c", help="Supporting claim ID."),
     observation: Optional[List[str]] = typer.Option(None, "--observation", "-o", help="Supporting observation ID."),
     evidence: Optional[List[str]] = typer.Option(None, "--evidence", "-e", help="Supporting evidence SHA-256 or prefix."),
@@ -737,6 +851,7 @@ def action_create(
             observation_refs=observation or [],
             evidence_refs=evidence or [],
             outcome=outcome,
+            subject_refs=subject_id or [],
         )
     except WorkspaceError as e:
         console.print(f"[{C_BAD}]✗ {e}[/]")

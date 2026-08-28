@@ -9,16 +9,18 @@ The current usable path is the operator CLI:
 ```bash
 python -m interfaces.cli.coreline declare --title "DB Exfiltration Alert" --severity SEV1
 python -m interfaces.cli.coreline evidence add --file alert.log --note "SIEM alert"
+python -m interfaces.cli.coreline subject create \
+  --type HOST --value prod-db --display-name "Production database"
 python -m interfaces.cli.coreline observe add \
   --text "CloudTrail shows database access from unusual source IP" \
-  --evidence <sha256-or-prefix>
+  --evidence <sha256-or-prefix> --subject-id SUB-ABC123DEF456
 python -m interfaces.cli.coreline observe correct OBS-ABC123DEF456 \
   --text "Source IP was 10.0.0.6" --reason "Analyst typo"
 python -m interfaces.cli.coreline observe retract OBS-ABC123DEF456 \
   --reason "Duplicate observation"
 python -m interfaces.cli.coreline claim add \
   --text "Production database was accessed from an unusual source IP" \
-  --observation OBS-ABC123DEF456 --status SUPPORTED
+  --observation OBS-ABC123DEF456 --status SUPPORTED --subject-id SUB-ABC123DEF456
 python -m interfaces.cli.coreline claim correct CLM-ABC123DEF456 \
   --text "Production database was accessed from 203.0.113.10" \
   --reason "Add confirmed source IP"
@@ -29,7 +31,7 @@ python -m interfaces.cli.coreline claim withdraw CLM-ABC123DEF456 \
 python -m interfaces.cli.coreline action create \
   --type credential-revocation \
   --description "Revoked exposed deployment credential" \
-  --claim CLM-ABC123DEF456 --status COMPLETED
+  --claim CLM-ABC123DEF456 --status COMPLETED --subject-id SUB-ABC123DEF456
 python -m interfaces.cli.coreline action status ACT-ABC123DEF456 \
   --status COMPLETED --reason "IAM confirmed revocation"
 python -m interfaces.cli.coreline action outcome ACT-ABC123DEF456 \
@@ -88,9 +90,13 @@ export CORELINE_ACTOR="$(whoami)"
 .venv/bin/python -m interfaces.cli.coreline doctor
 .venv/bin/python -m interfaces.cli.coreline list
 .venv/bin/python -m interfaces.cli.coreline use INC-YYYYMMDD-ABC123
+.venv/bin/python -m interfaces.cli.coreline subject create \
+  --type HOST --value prod-db --display-name "Production database"
+.venv/bin/python -m interfaces.cli.coreline subject list
+.venv/bin/python -m interfaces.cli.coreline subject show SUB-ABC123DEF456
 .venv/bin/python -m interfaces.cli.coreline observe add \
   --text "CloudTrail shows database access from unusual source IP" \
-  --evidence <sha256-or-prefix>
+  --evidence <sha256-or-prefix> --subject-id SUB-ABC123DEF456
 .venv/bin/python -m interfaces.cli.coreline observe list
 .venv/bin/python -m interfaces.cli.coreline observe show OBS-ABC123DEF456
 .venv/bin/python -m interfaces.cli.coreline observe correct OBS-ABC123DEF456 \
@@ -99,7 +105,7 @@ export CORELINE_ACTOR="$(whoami)"
   --reason "Duplicate observation"
 .venv/bin/python -m interfaces.cli.coreline claim add \
   --text "Production database was accessed from an unusual source IP" \
-  --observation OBS-ABC123DEF456 --status SUPPORTED
+  --observation OBS-ABC123DEF456 --status SUPPORTED --subject-id SUB-ABC123DEF456
 .venv/bin/python -m interfaces.cli.coreline claim list
 .venv/bin/python -m interfaces.cli.coreline claim show CLM-ABC123DEF456
 .venv/bin/python -m interfaces.cli.coreline claim correct CLM-ABC123DEF456 \
@@ -112,7 +118,7 @@ export CORELINE_ACTOR="$(whoami)"
 .venv/bin/python -m interfaces.cli.coreline action create \
   --type credential-revocation \
   --description "Revoked exposed deployment credential" \
-  --claim CLM-ABC123DEF456 --status COMPLETED
+  --claim CLM-ABC123DEF456 --status COMPLETED --subject-id SUB-ABC123DEF456
 .venv/bin/python -m interfaces.cli.coreline action list
 .venv/bin/python -m interfaces.cli.coreline action show ACT-ABC123DEF456
 .venv/bin/python -m interfaces.cli.coreline action amend ACT-ABC123DEF456 \
@@ -152,24 +158,30 @@ OPEN -> INVESTIGATING -> CONTAINED -> ERADICATING -> RECOVERING -> RESOLVED -> C
 `RESOLVED` locks evidence intake, `CLOSED` locks case mutation after the final PIR, and
 `SEALED` is the final read-only archival state.
 
+Subjects are immutable incident-local identities for users, hosts, IP addresses,
+credentials, services, files, malware, workloads, and other entities under investigation.
+They are not a CMDB, asset inventory, identity provider, or threat-intelligence store.
+Subject creation is audited and verified; existing records may still carry legacy display
+subject text, while new records can reference stable `SUB-*` IDs.
+
 Observations are immutable investigative records. They may reference zero or more evidence
 items by SHA-256 hash or unique hash prefix from the incident's authoritative manifest;
 Coreline never copies evidence bytes into an observation and never treats filesystem paths
-as evidence references. Corrections and retractions are append-only amendments: the
-original observation remains intact, and the amendment history is audited and included in
-the PIR.
+as evidence references. Observations may also reference stable incident Subjects.
+Corrections and retractions are append-only amendments: the original observation remains
+intact, and the amendment history is audited and included in the PIR.
 
 Claims are immutable investigative assertions derived from observations. A claim must
 reference at least one non-retracted observation from the same incident; claims cannot
-reference raw evidence hashes or filesystem paths directly. Corrections, status changes,
-and withdrawals are append-only amendments. Claim creation and amendments are audited, and
-verification fails if a claim or amendment is missing, tampered, or points at a missing
-observation.
+reference raw evidence hashes or filesystem paths directly. Claims may reference stable
+incident Subjects. Corrections, status changes, and withdrawals are append-only
+amendments. Claim creation and amendments are audited, and verification fails if a claim
+or amendment is missing, tampered, or points at a missing observation or Subject.
 
 Actions are immutable responder activity records. An action may reference claims,
-observations, and evidence hashes from the same incident. Corrections, status changes,
-outcome updates, and cancellations are append-only amendments. Action creation and
-amendments are audited, verified, and included in the PIR.
+observations, evidence hashes, and stable Subjects from the same incident. Corrections,
+status changes, outcome updates, and cancellations are append-only amendments. Action
+creation and amendments are audited, verified, and included in the PIR.
 
 Trusted signer registry workflow:
 

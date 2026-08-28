@@ -42,10 +42,15 @@ def test_incident_loading_and_navigation(tmp_path: Path):
     blob = _md(at)
     assert "DB Exfiltration Alert" in blob
     assert "Integrity verified" in blob
-    assert at.radio[1].options == ["Overview", "Evidence", "Observations", "Claims", "Actions", "Timeline", "Reports"]
+    assert at.radio[1].options == [
+        "Overview", "Evidence", "Subjects", "Observations", "Claims",
+        "Actions", "Timeline", "Reports",
+    ]
 
     _nav(at, "Evidence")
     assert "Evidence" in _md(at)
+    _nav(at, "Subjects")
+    assert "Subjects" in _md(at)
     _nav(at, "Observations")
     assert "Observations" in _md(at)
     _nav(at, "Claims")
@@ -143,6 +148,35 @@ def test_observation_create_correct_retract_workflow(tmp_path: Path):
     assert reloaded.effective_observation(obs.observation_id).current_status == "RETRACTED"
 
 
+def test_subject_create_and_reference_workflow(tmp_path: Path):
+    ws = _seed(tmp_path)
+    at = AppTest.from_file(APP, default_timeout=60).run()
+    assert not at.exception
+    _nav(at, "Subjects")
+
+    at.selectbox[0].set_value("HOST")
+    at.text_input[0].set_value("host-01")
+    at.text_input[1].set_value("Compromised host")
+    at.text_area[0].set_value("EDR alert source")
+    create = next(b for b in at.button if "Create subject" in (b.label or ""))
+    create.click().run()
+    assert not at.exception
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    subject = reloaded.subjects()[0]
+    assert subject.subject_type == "HOST"
+    assert subject.value == "host-01"
+
+    _nav(at, "Observations")
+    at.text_area[0].set_value("EDR shows unusual process execution")
+    at.multiselect[1].set_value([subject.subject_id])
+    record = next(b for b in at.button if "Record observation" in (b.label or ""))
+    record.click().run()
+
+    reloaded = type(ws).load(ws.home, ws.incident_id)
+    assert reloaded.observations()[0].subjects == (subject.subject_id,)
+
+
 def test_claim_create_workflow(tmp_path: Path):
     ws = _seed(tmp_path)
     obs = ws.add_observation("CloudTrail shows database access from unusual source IP", actor="alice@example.com")
@@ -212,8 +246,8 @@ def test_action_create_and_amendment_workflow(tmp_path: Path):
     at.text_area[0].set_value("Isolated compromised host")
     at.selectbox[0].set_value("INITIATED")
     at.text_input[1].set_value("host-01")
-    at.multiselect[0].set_value([claim.claim_id])
-    at.multiselect[1].set_value([obs.observation_id])
+    at.multiselect[1].set_value([claim.claim_id])
+    at.multiselect[2].set_value([obs.observation_id])
     at.text_area[1].set_value("Isolation command sent")
     record = next(b for b in at.button if "Record action" in (b.label or ""))
     record.click().run()
