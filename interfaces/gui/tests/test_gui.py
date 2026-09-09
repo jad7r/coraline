@@ -342,7 +342,9 @@ def test_case_graph_view_lists_relationships(tmp_path: Path):
     assert not at.exception
     _nav(at, "Case Graph")
     assert "Graph projection verified" in _md(at)
-    assert "INFORMS" in str(at.dataframe[0].value)
+    assert any("INFORMS" in str(frame.value) for frame in at.dataframe)
+    assert "Trace relationships" in _md(at)
+    assert any("record(s) and" in (caption.value or "") for caption in at.caption)
 
 
 def test_lifecycle_controls(tmp_path: Path):

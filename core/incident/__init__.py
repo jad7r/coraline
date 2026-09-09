@@ -4,6 +4,7 @@ from .case_graph import (
     CaseGraph,
     CaseGraphEdge,
     CaseGraphNode,
+    CaseGraphTrace,
     build_case_graph,
 )
 from .workspace import (
@@ -49,6 +50,7 @@ __all__ = [
     "CaseGraph",
     "CaseGraphEdge",
     "CaseGraphNode",
+    "CaseGraphTrace",
     "Claim",
     "ClaimAmendment",
     "CLAIM_AMENDMENT_TYPES",

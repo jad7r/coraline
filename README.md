@@ -47,6 +47,7 @@ python -m interfaces.cli.coreline decision approve DEC-ABC123DEF456 \
   --approved-by director@example.com --reason "Recovery authorized"
 python -m interfaces.cli.coreline graph show
 python -m interfaces.cli.coreline graph verify
+python -m interfaces.cli.coreline graph trace DEC-ABC123DEF456 --direction upstream
 python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -160,6 +161,8 @@ export CORELINE_ACTOR="$(whoami)"
 .venv/bin/python -m interfaces.cli.coreline graph show
 .venv/bin/python -m interfaces.cli.coreline graph show --format json
 .venv/bin/python -m interfaces.cli.coreline graph verify
+.venv/bin/python -m interfaces.cli.coreline graph trace DEC-ABC123DEF456 --direction upstream
+.venv/bin/python -m interfaces.cli.coreline graph trace <sha256> --direction downstream --format json
 .venv/bin/python -m interfaces.cli.coreline lifecycle contain --note "Blocked egress"
 .venv/bin/python -m interfaces.cli.coreline lifecycle eradicate --note "Credential rotated"
 .venv/bin/python -m interfaces.cli.coreline lifecycle recover --note "Database access validated"
@@ -228,6 +231,11 @@ explicit stored references such as evidence supporting an observation, an observ
 supporting a claim, a claim justifying an action, an action informing a decision, or a
 Subject being associated with one of those records. The PIR includes a textual Case
 Relationships section derived from this projection.
+
+Graph tracing answers provenance and impact questions without creating new state.
+`upstream` walks toward supporting records, `downstream` walks toward dependent records,
+and `both` returns the connected relationship subgraph. `--max-depth` limits the number
+of relationship hops, and `--format json` provides deterministic machine-readable output.
 
 Conceptually:
 

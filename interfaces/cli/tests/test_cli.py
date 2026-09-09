@@ -654,6 +654,18 @@ def test_graph_show_verify_and_json_export(tmp_path: Path):
     assert data["summary"]["decision"] == 1
     assert any(edge["target"] == f"DECISION:{decision_id}" for edge in data["edges"])
 
+    r = _run(["graph", "trace", decision_id, "--direction", "upstream", "--format", "json"], home)
+    assert r.exit_code == 0, r.output
+    trace = json.loads(r.output)
+    assert trace["root"]["record_id"] == decision_id
+    assert trace["direction"] == "upstream"
+    assert any(node["record_id"] == obs_id for node in trace["nodes"])
+    assert any(node["record_id"] == subject_id for node in trace["nodes"])
+
+    r = _run(["graph", "trace", "CLM-MISSING"], home)
+    assert r.exit_code == 1
+    assert "record not found" in r.output
+
 
 def test_lifecycle_contain_and_resolve_flow(tmp_path: Path):
     home = tmp_path / "incidents"

@@ -7,11 +7,19 @@ lifecycle, audit, and reporting remain owned by ``core.incident``.
 from __future__ import annotations
 
 from html import escape
+import sys
 import tempfile
 from pathlib import Path
 from typing import Iterable
 
 import streamlit as st
+
+# Streamlit executes this file with ``interfaces/gui`` at the front of
+# ``sys.path``. Add the repository root so the local ``core`` package resolves
+# when operators use the documented ``streamlit run interfaces/gui/app.py``.
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 from core.incident import (
     ACTION_STATUSES,
@@ -1053,6 +1061,29 @@ def render_case_graph(ws: IncidentWorkspace) -> None:
     c5.metric("Actions", summary.get("action", 0))
     c6.metric("Decisions", summary.get("decision", 0))
     c7.metric("Relationships", summary.get("relationships", 0))
+
+    node_options = [node.record_id for node in graph.nodes]
+    if node_options:
+        st.markdown("#### Trace relationships")
+        trace_record = st.selectbox("Record", node_options, key="graph-trace-record")
+        trace_direction = st.selectbox(
+            "Direction", ("upstream", "downstream", "both"), key="graph-trace-direction"
+        )
+        trace = graph.trace(trace_record, direction=trace_direction)
+        st.caption(
+            f"{len(trace.nodes)} record(s) and {len(trace.edges)} relationship(s) "
+            f"from {trace.root.node_id}."
+        )
+        if trace.edges:
+            st.dataframe(
+                [
+                    {"source": edge.source, "relationship": edge.relationship, "target": edge.target}
+                    for edge in trace.edges
+                ],
+                use_container_width=True,
+                hide_index=True,
+                key="graph-trace-results",
+            )
 
     st.markdown('<div class="band"></div>', unsafe_allow_html=True)
     if not graph.edges:

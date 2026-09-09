@@ -1377,6 +1377,49 @@ def graph_verify(
     raise typer.Exit(code=1)
 
 
+@graph_app.command("trace")
+def graph_trace(
+    record_id: str = typer.Argument(..., help="Record or graph node ID to trace."),
+    direction: str = typer.Option(
+        "both", "--direction", "-d", help="upstream, downstream, or both."
+    ),
+    max_depth: Optional[int] = typer.Option(
+        None, "--max-depth", help="Maximum relationship hops."
+    ),
+    output_format: str = typer.Option("table", "--format", help="table or json."),
+    incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
+    home: Optional[str] = typer.Option(None, "--home"),
+):
+    """Trace supporting or dependent records through the case graph."""
+    ws = _load(home, incident_id)
+    try:
+        trace = ws.case_graph().trace(record_id, direction=direction, max_depth=max_depth)
+    except ValueError as e:
+        console.print(f"[{C_BAD}]✗ {e}[/]")
+        raise typer.Exit(code=1)
+    if output_format.lower() == "json":
+        console.print(json.dumps(trace.to_dict(), indent=2, sort_keys=True))
+        return
+    if output_format.lower() != "table":
+        console.print(f"[{C_BAD}]✗ invalid graph format: {output_format}[/]")
+        raise typer.Exit(code=1)
+
+    table = Table(
+        title=f"[bold]CASE TRACE[/]  {trace.root.node_id} · {trace.direction}",
+        box=box.SIMPLE_HEAVY,
+        header_style=C_ACCENT,
+        border_style="cyan",
+        pad_edge=False,
+    )
+    table.add_column("source", style=C_ACCENT, overflow="fold", ratio=1)
+    table.add_column("relationship", no_wrap=True)
+    table.add_column("target", style=C_ACCENT, overflow="fold", ratio=1)
+    for edge in trace.edges:
+        table.add_row(edge.source, edge.relationship, edge.target)
+    console.print(table)
+    console.print(f"[{C_DIM}]{len(trace.nodes)} record(s), {len(trace.edges)} relationship(s)[/]")
+
+
 # ---- lifecycle -------------------------------------------------------------- #
 
 def _transition(

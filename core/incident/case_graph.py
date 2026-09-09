@@ -119,6 +119,88 @@ class CaseGraph:
                     errors.append(f"{edge.edge_id}: invalid edge {spec}")
         return not errors, errors
 
+    def trace(
+        self,
+        record_id: str,
+        *,
+        direction: str = "both",
+        max_depth: int | None = None,
+    ) -> "CaseGraphTrace":
+        """Return the deterministic relationship subgraph around one record.
+
+        ``upstream`` follows incoming edges toward supporting records,
+        ``downstream`` follows outgoing edges toward dependent records, and
+        ``both`` follows either direction. The root is always included.
+        """
+        normalized_direction = direction.lower()
+        if normalized_direction not in {"upstream", "downstream", "both"}:
+            raise ValueError(f"invalid trace direction: {direction}")
+        if max_depth is not None and max_depth < 0:
+            raise ValueError("max depth must be zero or greater")
+
+        exact = [
+            node for node in self.nodes
+            if node.node_id == record_id or node.record_id == record_id
+        ]
+        if not exact:
+            raise ValueError(f"record not found in case graph: {record_id}")
+        if len(exact) > 1:
+            raise ValueError(f"ambiguous record in case graph: {record_id}")
+        root = exact[0]
+
+        outgoing: Dict[str, List[CaseGraphEdge]] = {}
+        incoming: Dict[str, List[CaseGraphEdge]] = {}
+        for edge in self.edges:
+            outgoing.setdefault(edge.source, []).append(edge)
+            incoming.setdefault(edge.target, []).append(edge)
+
+        seen = {root.node_id}
+        frontier = [(root.node_id, 0)]
+        traced_edge_ids = set()
+        while frontier:
+            node_id, depth = frontier.pop(0)
+            if max_depth is not None and depth >= max_depth:
+                continue
+            candidates: List[Tuple[CaseGraphEdge, str]] = []
+            if normalized_direction in {"downstream", "both"}:
+                candidates.extend((edge, edge.target) for edge in outgoing.get(node_id, ()))
+            if normalized_direction in {"upstream", "both"}:
+                candidates.extend((edge, edge.source) for edge in incoming.get(node_id, ()))
+            for edge, adjacent in sorted(candidates, key=lambda item: item[0].edge_id):
+                traced_edge_ids.add(edge.edge_id)
+                if adjacent not in seen:
+                    seen.add(adjacent)
+                    frontier.append((adjacent, depth + 1))
+
+        return CaseGraphTrace(
+            incident_id=self.incident_id,
+            root=root,
+            direction=normalized_direction,
+            max_depth=max_depth,
+            nodes=tuple(node for node in self.nodes if node.node_id in seen),
+            edges=tuple(edge for edge in self.edges if edge.edge_id in traced_edge_ids),
+        )
+
+
+@dataclass(frozen=True)
+class CaseGraphTrace:
+    incident_id: str
+    root: CaseGraphNode
+    direction: str
+    max_depth: int | None
+    nodes: Tuple[CaseGraphNode, ...]
+    edges: Tuple[CaseGraphEdge, ...]
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "incident_id": self.incident_id,
+            "root": self.root.to_dict(),
+            "direction": self.direction,
+            "max_depth": self.max_depth,
+            "nodes": [node.to_dict() for node in self.nodes],
+            "edges": [edge.to_dict() for edge in self.edges],
+        }
+
 
 def _node_id(node_type: str, record_id: str) -> str:
     return f"{node_type}:{record_id}"

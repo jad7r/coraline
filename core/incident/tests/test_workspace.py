@@ -1412,6 +1412,48 @@ def test_case_graph_validation_detects_invalid_edges():
     assert any("dangling source" in err for err in errors)
 
 
+def test_case_graph_trace_follows_upstream_and_downstream(home: Path, evidence_file: Path):
+    ws = _declare(home)
+    evidence, subject, obs, claim, action = _seed_decision_refs(ws, evidence_file)
+    decision = ws.create_decision(
+        "authorize-recovery", "Authorize recovery", "Containment complete",
+        decided_by="lead", actor="lead", action_refs=[action.action_id],
+    )
+    graph = ws.case_graph()
+
+    upstream = graph.trace(decision.decision_id, direction="upstream")
+    assert upstream.root.record_id == decision.decision_id
+    assert {node.record_id for node in upstream.nodes} >= {
+        decision.decision_id, action.action_id, claim.claim_id, obs.observation_id,
+        evidence["sha256"], subject.subject_id,
+    }
+
+    downstream = graph.trace(evidence["sha256"], direction="downstream")
+    assert {node.record_id for node in downstream.nodes} >= {
+        evidence["sha256"], obs.observation_id, claim.claim_id, action.action_id,
+        decision.decision_id,
+    }
+
+
+def test_case_graph_trace_respects_depth_and_rejects_bad_input(home: Path):
+    ws = _declare(home)
+    obs = ws.add_observation("Observed activity", actor="lead")
+    claim = ws.add_claim("Activity occurred", actor="lead", observation_refs=[obs.observation_id])
+    action = ws.create_action("contain", "Contained activity", actor="lead",
+                              claim_refs=[claim.claim_id])
+    graph = ws.case_graph()
+
+    trace = graph.trace(obs.observation_id, direction="downstream", max_depth=1)
+    assert {node.record_id for node in trace.nodes} == {obs.observation_id, claim.claim_id}
+    assert len(trace.edges) == 1
+    with pytest.raises(ValueError, match="record not found"):
+        graph.trace("CLM-MISSING")
+    with pytest.raises(ValueError, match="invalid trace direction"):
+        graph.trace(action.action_id, direction="sideways")
+    with pytest.raises(ValueError, match="max depth"):
+        graph.trace(action.action_id, max_depth=-1)
+
+
 def test_report_includes_case_relationships(home: Path, evidence_file: Path):
     ws = _declare(home)
     _, subject, obs, claim, action = _seed_decision_refs(ws, evidence_file)
