@@ -802,3 +802,74 @@ def test_bad_severity_exits_nonzero(tmp_path: Path):
     r = _run(["declare", "--title", "x", "--severity", "SEV9"], home)
     assert r.exit_code == 1
     assert "invalid severity" in r.output
+
+
+def test_trusted_verification_operator_flow(tmp_path: Path):
+    home = tmp_path / "incidents"
+    assert _run(["declare", "--title", "Trust check", "--severity", "SEV2"], home).exit_code == 0
+    missing = _run(["verify", "--trusted"], home)
+    assert missing.exit_code == 1
+    assert "registry verification failed" in missing.output
+    assert _run(["registry", "init"], home).exit_code == 0
+    unknown = _run(["verify", "--trusted"], home)
+    assert unknown.exit_code == 1
+    assert "signer not in trusted registry" in unknown.output
+    assert _run(["registry", "trust-active"], home).exit_code == 0
+    trusted = _run(["verify", "--trusted", "--min-sequence", "2"], home)
+    assert trusted.exit_code == 0, trusted.output
+    assert "signer trust" in trusted.output
+    assert "trusted" in trusted.output
+    stale = _run(["verify", "--trusted", "--min-sequence", "3"], home)
+    assert stale.exit_code == 1
+    assert "below floor" in stale.output
+    ev = tmp_path / "alert.log"
+    ev.write_text("original")
+    assert _run(["evidence", "add", "--file", str(ev)], home).exit_code == 0
+    iid = (home / "CURRENT").read_text().strip()
+    next((home / iid / "store").rglob("alert.log")).write_text("tampered")
+    bad = _run(["verify", "--trusted"], home)
+    assert bad.exit_code == 1
+    assert "bad hash" in bad.output
+
+
+def test_verify_rejects_ambiguous_or_unused_options(tmp_path: Path):
+    for args in (["--all", "--id", "incident"], ["--min-sequence", "2"],
+                 ["--root-verify", "root.json"], ["--trusted", "--min-sequence", "-1"]):
+        result = _run(["verify", *args], tmp_path)
+        assert result.exit_code == 2, result.output
+
+
+def test_trusted_verify_custom_paths_revocation_and_tamper(tmp_path: Path):
+    from datetime import datetime, timezone
+    from interfaces.cli.coreline import _read_root_key
+    from core.evidence.registry import load_registry, save_registry, seal_registry
+    from core.evidence.seal import write_seal
+
+    home = tmp_path / "incidents"
+    assert _run(["declare", "--title", "Trust", "--severity", "SEV2"], home).exit_code == 0
+    assert _run(["registry", "init"], home).exit_code == 0
+    assert _run(["registry", "trust-active"], home).exit_code == 0
+    registry_path = tmp_path / "registry.json"
+    seal_path = tmp_path / "seal.json"
+    root_path = tmp_path / "root.json"
+    for source, target in (("registry.json", registry_path), ("registry.json.seal.json", seal_path),
+                           ("root.verify.json", root_path)):
+        target.write_bytes((home / "trust" / source).read_bytes())
+    args = ["verify", "--all", "--trusted", "--registry", str(registry_path),
+            "--seal", str(seal_path), "--root-verify", str(root_path), "--min-sequence", "2"]
+    result = _run(args, home)
+    assert result.exit_code == 0, result.output
+    reg = load_registry(registry_path)
+    fingerprint = next(iter(reg.entries))
+    reg.revoke(fingerprint, revoked_when=datetime.now(timezone.utc))
+    reg.bump(3)
+    save_registry(reg, registry_path)
+    write_seal(seal_registry(reg, _read_root_key(home / "trust" / "root.key"),
+                             signer="tester", sealed_when=datetime.now(timezone.utc)), seal_path)
+    revoked = _run(args, home)
+    assert revoked.exit_code == 1, revoked.output
+    assert "signer key revoked" in revoked.output
+    registry_path.write_text(registry_path.read_text().replace('"sequence":3', '"sequence":4'))
+    tampered = _run(args, home)
+    assert tampered.exit_code == 1
+    assert "registry verification failed" in tampered.output

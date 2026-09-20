@@ -10,6 +10,7 @@ incident event, asserting a 2xx and a PIR-shaped response.
 """
 
 import unittest
+from unittest.mock import patch
 import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -135,8 +136,9 @@ class TestHealthRoute(unittest.TestCase):
         # must still show the fakeredis check passing.
         with TemporaryDirectory() as d:
             app = _build_offline_app(Path(d))
-            with self.assertRaises(HTTPException) as ctx:
-                _run(health.readiness_check(_request_for(app)))
+            with patch("services.shared.secrets.read_secret", return_value=None):
+                with self.assertRaises(HTTPException) as ctx:
+                    _run(health.readiness_check(_request_for(app)))
             self.assertEqual(ctx.exception.status_code, 503)
             self.assertTrue(ctx.exception.detail["checks"]["redis"])
 

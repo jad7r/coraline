@@ -1,11 +1,8 @@
 """Secret loading for Coreline services.
 
-Resolution order for every secret:
-
-1. Environment variable (e.g. ``SLACK_BOT_TOKEN``) — preferred for containers
-   and CI.
-2. OS keychain via ``keyring`` under service name ``Coreline`` — preferred for local
-   developer machines (matches ``storage.py``).
+Resolution order: CORELINE_ environment name, legacy environment aliases,
+Coreline OS keychain (lowercase key), then legacy secops-secure-enclave keychain
+(environment-style names). Empty values are treated as absent.
 
 Secrets are **never** hardcoded here. If ``fail_fast`` is set, a missing secret
 raises :class:`SecretLoadError` at lookup time so a misconfigured service exits
@@ -29,17 +26,52 @@ class SecretLoadError(Exception):
     """Raised when a required secret cannot be resolved."""
 
 
-def _keychain_get(key: str) -> Optional[str]:
+def _keychain_get(key: str, service: str = KEYCHAIN_SERVICE) -> Optional[str]:
     """Best-effort keychain lookup. Returns None if unavailable."""
     try:
         import keyring  # imported lazily so the dependency stays optional
     except Exception:
         return None
     try:
-        return keyring.get_password(KEYCHAIN_SERVICE, key)
+        return keyring.get_password(service, key)
     except Exception:
         # Keychain locked / no backend (headless CI) — treat as "not found".
         return None
+
+
+# Preserve both the old shared-loader and brain-service Anthropic names.
+_SECRET_ALIASES = {
+    "ANTHROPIC_API_KEY": ("ANTHROPIC_API_KEY", "CLAUDE_API_KEY"),
+}
+
+
+def _secret_names(env_var: str) -> tuple[str, ...]:
+    name = env_var.removeprefix("CORELINE_")
+    if name == "CLAUDE_API_KEY":
+        name = "ANTHROPIC_API_KEY"
+    aliases = _SECRET_ALIASES.get(name, (name,))
+    return tuple(f"CORELINE_{alias}" for alias in aliases) + aliases
+
+
+def read_secret(env_var: str, *, keychain_key: Optional[str] = None) -> Optional[str]:
+    """Resolve a secret consistently for startup, providers, and readiness."""
+    names = _secret_names(env_var)
+    for name in names:
+        value = os.environ.get(name)
+        if value:
+            return value
+    key = keychain_key or names[0].removeprefix("CORELINE_").lower()
+    # The original shared accessor used claude_api_key, not anthropic_api_key.
+    keys = (key, "claude_api_key") if names[0] == "CORELINE_ANTHROPIC_API_KEY" else (key,)
+    for candidate in dict.fromkeys(keys):
+        value = _keychain_get(candidate)
+        if value:
+            return value
+    for name in names:
+        value = _keychain_get(name, "secops-secure-enclave")
+        if value:
+            return value
+    return None
 
 
 class Secrets:
@@ -64,13 +96,11 @@ class Secrets:
         required: bool = True,
     ) -> Optional[str]:
         """Resolve a single secret by env var name, then keychain key."""
-        value = os.environ.get(env_var)
-        if not value:
-            value = _keychain_get(keychain_key or env_var.lower())
+        value = read_secret(env_var, keychain_key=keychain_key)
 
         if not value and required and self.fail_fast:
             raise SecretLoadError(
-                f"Required secret '{env_var}' not found in environment "
+                f"Required secret '{_secret_names(env_var)[0]}' not found in environment "
                 f"or OS keychain (service '{KEYCHAIN_SERVICE}')."
             )
         return value
@@ -87,7 +117,13 @@ class Secrets:
 
     def get_claude_api_key(self) -> Optional[str]:
         """Anthropic API key for the brain service."""
-        return self.get("CLAUDE_API_KEY", keychain_key="claude_api_key")
+        return self.get("ANTHROPIC_API_KEY")
+
+    def get_jira_api_token(self) -> Optional[str]:
+        return self.get("JIRA_API_TOKEN")
+
+    def get_jira_email(self) -> Optional[str]:
+        return self.get("JIRA_EMAIL")
 
 
 def initialize_secrets(environment: str = "prod", fail_fast: bool = True) -> Secrets:

@@ -1723,9 +1723,30 @@ def verify(
     incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
     all_incidents: bool = typer.Option(False, "--all", help="Verify every incident in the store."),
     home: Optional[str] = typer.Option(None, "--home"),
+    trusted: bool = typer.Option(False, "--trusted", help="Require a signer trusted by the root-signed registry."),
+    registry: Optional[str] = typer.Option(None, "--registry", help="Registry JSON path; requires --trusted."),
+    seal: Optional[str] = typer.Option(None, "--seal", help="Registry seal path; requires --trusted."),
+    root_verify: Optional[str] = typer.Option(None, "--root-verify", help="Pinned root public key JSON; requires --trusted."),
+    min_sequence: Optional[int] = typer.Option(None, "--min-sequence", min=0, help="Registry sequence floor; requires --trusted."),
 ):
     """Verify manifests, custody, audit chain, and stored local evidence artifacts."""
+    if all_incidents and incident_id:
+        raise typer.BadParameter("--all and --id cannot be combined")
+    if not trusted and any(value is not None for value in (registry, seal, root_verify, min_sequence)):
+        raise typer.BadParameter("registry options require --trusted")
     h = _home(home)
+    trusted_registry = None
+    if trusted:
+        try:
+            registry_path = _registry_path(h, registry)
+            root_vk, _ = _read_root_verify(_root_verify_path(h, root_verify))
+            trusted_registry = load_signed_registry(
+                registry_path, _registry_seal_path(registry_path, seal), root_vk,
+                min_sequence=min_sequence if min_sequence is not None else 0,
+            )
+        except (RegistryError, OSError, ValueError, KeyError, TypeError) as e:
+            console.print(Text(f"registry verification failed: {e}", style=C_BAD))
+            raise typer.Exit(code=1)
     workspaces = []
     try:
         if all_incidents:
@@ -1746,6 +1767,11 @@ def verify(
     for ws in workspaces:
         v = ws.verify()
         ok = _verification_ok(v)
+        if trusted_registry is not None:
+            trust = ws.verify_signer(trusted_registry)
+            v["signer_trust"] = trust.outcome.value
+            v["trust_reason"] = trust.reason
+            ok = ok and trust.trusted
         if not ok:
             failed.append(ws.incident_id)
         console.print(_verification_panel(ws, v, ok))
@@ -1774,6 +1800,9 @@ def _verification_panel(ws: IncidentWorkspace, v: dict, ok: bool) -> Panel:
     table.add_row("custody", "intact" if v["custody_chain"] else f"broken @ {v['custody_bad_index']}")
     table.add_row("audit", "intact" if v["audit_chain"] else f"broken @ seq {v['audit_bad_seq']}")
     table.add_row("storage", "verified" if v["storage_artifacts"] else "failed")
+    table.add_row("signer trust", v.get("signer_trust", "not checked (use --trusted)"))
+    if "trust_reason" in v:
+        table.add_row("trust reason", Text(v["trust_reason"]))
     table.add_row("manifest hash", Text(str(v.get("manifest_hash") or ""), style=C_DIM))
     if v["storage_missing"]:
         table.add_row("missing", ", ".join(v["storage_missing"]))

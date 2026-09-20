@@ -22,7 +22,7 @@ import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
-from services.brain_service._lib_shim import initialize_secrets, SecretLoadError, _read_secret
+from services.shared.secrets import initialize_secrets, SecretLoadError
 from services.brain_service.config import get_settings
 from services.brain_service.handlers.pir_subscriber import PIRSubscriber
 from services.brain_service.handlers.pir_orchestrator import PIROrchestrator
@@ -72,15 +72,8 @@ async def lifespan(app: FastAPI):
         secrets.get_claude_api_key()
         secrets.get_slack_bot_token()
 
-        # Jira credentials come from env / keychain too.
-        jira_api_token = _read_secret('CORELINE_JIRA_API_TOKEN', 'JIRA_API_TOKEN')
-        jira_email = _read_secret('CORELINE_JIRA_EMAIL', 'JIRA_EMAIL')
-
-        if not jira_api_token or not jira_email:
-            raise SecretLoadError(
-                "Jira credentials required: CORELINE_JIRA_API_TOKEN and CORELINE_JIRA_EMAIL "
-                "(env or 'secops-secure-enclave' keyring)."
-            )
+        secrets.get_jira_api_token()
+        secrets.get_jira_email()
 
         logger.info("service.secrets_loaded", msg="Secrets and credentials loaded successfully")
 

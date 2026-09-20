@@ -1,11 +1,10 @@
 """
 Minimal local shims for the dependencies this service was archived against.
 
-The archived ``coreline-brain-service`` imported four modules that do NOT exist in the
+The archived ``coreline-brain-service`` imported modules that do NOT exist in the
 active tree (they belonged to sibling services / net-new builds that were never
 brought forward):
 
-  * ``services.shared``            — secrets manager (``initialize_secrets``, ...)
   * ``collectors.jira_incident``   — Jira metadata collector
   * ``brain.assemble_pir_input``   — PIR data-packet assembler
   * ``brain.generate_pir``         — Claude-backed PIR generator
@@ -21,10 +20,10 @@ and never touch a live LLM or the network. The real Claude implementation
 is present.
 
 Secrets (LLM API keys, tokens) are read from the environment or the OS keychain
-(``keyring``) — never hardcoded.
+(``keyring``) through ``services.shared.secrets`` — never hardcoded.
 
 # TODO(ADR-0003 integration): swap these shims for the real
-#   services.shared / collectors.jira_incident / brain.* modules once those land.
+#   collectors.jira_incident / brain.* modules once those land.
 """
 
 from __future__ import annotations
@@ -35,88 +34,9 @@ from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
 import structlog
 
+from services.shared.secrets import SecretLoadError, read_secret
+
 logger = structlog.get_logger(__name__)
-
-# Reuse the repo-wide OS-keychain namespace (core/evidence/integrity/keystore.py)
-# so secrets provisioned once are visible to every Coreline component, rather than
-# inventing a second, divergent keyring service name.
-KEYRING_SERVICE = "secops-secure-enclave"
-
-
-# ---------------------------------------------------------------------------
-# Secrets loading (shim for services.shared)
-# ---------------------------------------------------------------------------
-class SecretLoadError(RuntimeError):
-    """Raised when a required secret cannot be loaded (fail-fast startup)."""
-
-
-def _read_secret(*names: str) -> Optional[str]:
-    """Read a secret from the environment, then the OS keychain (``keyring``).
-
-    Tries each name (e.g. ``CORELINE_ANTHROPIC_API_KEY`` then ``ANTHROPIC_API_KEY``)
-    against ``os.environ`` first, then against the ``secops-secure-enclave``
-    keyring service (the repo-wide namespace). Never returns hardcoded values.
-
-    Args:
-        *names: Candidate variable names, in priority order.
-
-    Returns:
-        The secret value, or ``None`` if not found in any source.
-    """
-    for name in names:
-        val = os.getenv(name)
-        if val:
-            return val
-    # Fall back to OS keychain. keyring is optional; absence is not fatal here.
-    try:
-        import keyring
-    except Exception:  # pragma: no cover - keyring not installed
-        return None
-    for name in names:
-        try:
-            val = keyring.get_password(KEYRING_SERVICE, name)
-        except Exception:  # pragma: no cover - no backend available
-            val = None
-        if val:
-            return val
-    return None
-
-
-class _SecretsManager:
-    """Loads and exposes Coreline secrets from env / OS keychain.
-
-    Shim for ``services.shared.initialize_secrets``. Reads on demand; when
-    ``fail_fast`` is set, a missing required secret raises :class:`SecretLoadError`
-    at startup rather than at first use.
-    """
-
-    def __init__(self, environment: str = "prod", fail_fast: bool = True) -> None:
-        self.environment = environment
-        self.fail_fast = fail_fast
-
-    def get_claude_api_key(self) -> Optional[str]:
-        key = _read_secret("CORELINE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
-        if not key and self.fail_fast:
-            raise SecretLoadError(
-                "Anthropic API key not found "
-                "(set CORELINE_ANTHROPIC_API_KEY or store it in the 'coreline' keyring)."
-            )
-        return key
-
-    def get_slack_bot_token(self) -> Optional[str]:
-        token = _read_secret("CORELINE_SLACK_BOT_TOKEN", "SLACK_BOT_TOKEN")
-        if not token and self.fail_fast:
-            raise SecretLoadError(
-                "Slack bot token not found "
-                "(set CORELINE_SLACK_BOT_TOKEN or store it in the 'coreline' keyring)."
-            )
-        return token
-
-
-def initialize_secrets(environment: str = "prod", fail_fast: bool = True) -> _SecretsManager:
-    """Initialize the secrets manager (shim for ``services.shared``)."""
-    return _SecretsManager(environment=environment, fail_fast=fail_fast)
-
 
 # ---------------------------------------------------------------------------
 # AI provider boundary (ADR-0002 §2: replaceable, advisory LLM plugin)
@@ -176,7 +96,7 @@ class ClaudePIRProvider:
     """
 
     def __init__(self, model: str, api_key: Optional[str] = None) -> None:
-        api_key = api_key or _read_secret("CORELINE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
+        api_key = api_key or read_secret("ANTHROPIC_API_KEY")
         if not api_key:
             raise SecretLoadError("ClaudePIRProvider requires an Anthropic API key.")
         try:
@@ -204,7 +124,7 @@ def default_pir_provider(model: str) -> PIRProvider:
     This keeps AI strictly optional and advisory — with no key (e.g. offline /
     tests) the deterministic :class:`FakePIRProvider` is used automatically.
     """
-    if _read_secret("CORELINE_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY"):
+    if read_secret("ANTHROPIC_API_KEY"):
         try:
             return ClaudePIRProvider(model=model)
         except SecretLoadError:  # pragma: no cover - defensive

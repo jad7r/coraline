@@ -255,11 +255,27 @@ Trusted signer registry workflow:
 .venv/bin/python -m interfaces.cli.coreline registry init
 .venv/bin/python -m interfaces.cli.coreline registry trust-active
 .venv/bin/python -m interfaces.cli.coreline registry verify --min-sequence 2
+.venv/bin/python -m interfaces.cli.coreline verify --trusted --min-sequence 2
+# Check every incident using an explicitly pinned root public key:
+.venv/bin/python -m interfaces.cli.coreline verify --all --trusted --root-verify /path/to/root.verify.json --min-sequence 2
 ```
 
 By default this writes a demo local root key and signed registry under
 `$CORELINE_HOME/trust/`. The root key is a local development convenience; production root
 key custody should be handled outside the incident workspace.
+
+`verify --trusted` checks the registry root seal and sequence floor, then requires
+the incident manifest signature to verify against a trusted, non-revoked registry
+key. It also runs the existing custody, audit, and local evidence storage checks.
+Any failed check exits with status 1; invalid option combinations exit with status 2.
+Use `--id` to target one incident or `--all` for the store. Custom trust files can
+be supplied with `--registry`, `--seal`, and `--root-verify`.
+These options and `--min-sequence` require `--trusted`.
+Without `--trusted`, verification checks local integrity and reports signer trust
+as unchecked. The default sequence floor is zero; supply a known minimum sequence
+for rollback protection. Keep the pinned public key outside the writable workspace
+when independent trust is required. These local storage checks do not attest cloud
+retention settings.
 
 ## Verification
 
@@ -272,8 +288,11 @@ Baseline test gate:
 Current local baseline at this checkpoint:
 
 ```text
-357 passed, 1 skipped, 17 warnings, 6 subtests passed
+396 passed, 1 skipped, 17 warnings, 6 subtests passed
 ```
+
+An additional provider-selection regression passed in the focused secret suite
+(11 passed) after this full baseline run.
 
 Scrub check for old project naming: search the working tree for the previous project name
 while excluding `.git/`, `.venv/`, bytecode, and cache directories. The expected result is
@@ -290,6 +309,8 @@ autonomous/           autonomous workflow experiments
 docs/                 ADRs, specs, and status notes
 scripts/              standalone utilities
 ```
+
+Service startup and environment examples: [services/README.md](services/README.md).
 
 ## Direction
 

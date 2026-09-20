@@ -8,7 +8,7 @@ Provides liveness and readiness probes for Kubernetes/Cloud Run orchestration.
 from fastapi import APIRouter, Request, HTTPException
 import redis.asyncio as redis
 import structlog
-import os
+from services.shared.secrets import initialize_secrets
 
 logger = structlog.get_logger(__name__)
 
@@ -69,25 +69,20 @@ async def readiness_check(request: Request):
 
     # Check required credentials are present (not making actual API calls)
     try:
-        required_credentials = [
-            "CORELINE_ANTHROPIC_API_KEY",
-            "CORELINE_JIRA_API_TOKEN",
-            "CORELINE_JIRA_EMAIL",
-            "CORELINE_SLACK_BOT_TOKEN"
-        ]
-
-        # Check if credentials are in environment or secrets manager
-        credentials_loaded = all(
-            os.getenv(cred) or os.getenv(cred.replace("CORELINE_", ""))
-            for cred in required_credentials
-        )
+        secrets = initialize_secrets(fail_fast=False)
+        credentials_loaded = all((
+            secrets.get_claude_api_key(),
+            secrets.get_jira_api_token(),
+            secrets.get_jira_email(),
+            secrets.get_slack_bot_token(),
+        ))
 
         if credentials_loaded:
             checks["credentials"] = True
         else:
             logger.warning(
                 "health.credentials_check_failed",
-                msg="Required credentials not found in environment"
+                msg="Required credentials not found in environment or keychain"
             )
     except Exception as e:
         logger.warning(

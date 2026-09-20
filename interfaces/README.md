@@ -6,7 +6,9 @@ skill from "the product" to *one interface*.
 
 - `cli/` — the `coreline` operator CLI (primary interface; offline "3am" path). It
   supports declare, evidence intake, timeline, status, report, doctor, use, list, and
-  close over `core.incident`.
+  close over `core.incident`. `verify --trusted` combines local evidence integrity
+  checks with signer verification against a root-signed registry; use
+  `--min-sequence` to enforce a known registry sequence floor.
 - `gui/` — optional Streamlit console over the same `core.incident` workspace.
 - `skill/` — the Claude Desktop skill front-end (`SKILL.md` + templates), re-pointed to
   call `core/`. Remains a valid **zero-token assisted mode**.

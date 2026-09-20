@@ -45,6 +45,7 @@ from core.evidence._util import canonical_json, to_iso
 from core.evidence.hashing import sha256_bytes, sha256_file
 from core.evidence.manifest import EvidenceManifest, build_evidence_item
 from core.evidence.integrity import signing
+from core.evidence.registry import Outcome, TrustedSignerRegistry, VerificationResult
 from core.storage.local import LocalFileBackend
 
 # ---- constants --------------------------------------------------------------- #
@@ -3938,6 +3939,30 @@ class IncidentWorkspace:
         }
 
     # -- verification ---------------------------------------------------------- #
+    def verify_signer(self, registry: TrustedSignerRegistry) -> VerificationResult:
+        """Verify the workspace signature against an already root-verified registry.
+
+        The caller must authenticate the registry and enforce its sequence floor first.
+        Workspace manifests use raw detached signatures, rather than evidence seals.
+        """
+        try:
+            local_key, _ = self._read_verify_key()
+            fingerprint = signing.key_fingerprint(local_key)
+            entry = registry.get(fingerprint)
+            if entry is None:
+                return VerificationResult(Outcome.UNKNOWN, None, "signer not in trusted registry")
+            if entry.status == "revoked":
+                return VerificationResult(Outcome.REVOKED, entry.signer, "signer key revoked")
+            key = signing.decode_verify_key(entry.verify_key)
+            if entry.status != "trusted" or signing.key_fingerprint(key) != fingerprint:
+                return VerificationResult(Outcome.UNTRUSTED, entry.signer, "registry entry key mismatch")
+            signature = base64.b64decode(self._sig_path.read_text().strip(), validate=True)
+            if not signing.verify(self._manifest_path.read_bytes(), signature, key):
+                return VerificationResult(Outcome.UNTRUSTED, entry.signer, "manifest signature invalid")
+            return VerificationResult(Outcome.TRUSTED, entry.signer, "ok")
+        except Exception:
+            return VerificationResult(Outcome.UNTRUSTED, None, "manifest or signer data unreadable")
+
     def verify(self) -> Dict[str, Any]:
         """Full integrity check: manifest signature, custody chain, audit chain, storage."""
         result: Dict[str, Any] = {
