@@ -70,7 +70,7 @@ async def lifespan(app: FastAPI):
         logger.info("service.initializing_redis", redis_url=config.redis_url)
 
         redis_client = redis.from_url(
-            config.redis_url,
+            config.redis_url.get_secret_value(),
             encoding="utf-8",
             decode_responses=True,
             socket_connect_timeout=config.redis_timeout
@@ -98,7 +98,7 @@ async def lifespan(app: FastAPI):
         except SlackApiError as e:
             logger.critical(
                 "service.slack_auth_failed",
-                error=str(e),
+                error=type(e).__name__,
                 error_code=e.response.get('error'),
                 msg="Failed to authenticate with Slack"
             )
@@ -186,7 +186,7 @@ async def lifespan(app: FastAPI):
     except SecretLoadError as e:
         logger.critical(
             "service.secret_load_failed",
-            error=str(e),
+            error=type(e).__name__,
             msg="Cannot start service without required secrets"
         )
         sys.exit(1)
@@ -194,7 +194,7 @@ async def lifespan(app: FastAPI):
     except redis.RedisError as e:
         logger.critical(
             "service.redis_connection_failed",
-            error=str(e),
+            error=type(e).__name__,
             msg="Cannot start service without Redis connectivity"
         )
         sys.exit(1)
@@ -202,7 +202,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.critical(
             "service.startup_failed",
-            error=str(e),
+            error=type(e).__name__,
             error_type=type(e).__name__,
             msg="Unexpected error during service startup"
         )

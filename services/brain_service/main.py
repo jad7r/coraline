@@ -22,6 +22,7 @@ import structlog
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
+from services.brain_service._lib_shim import ClaudePIRProvider
 from services.shared.secrets import initialize_secrets, SecretLoadError
 from services.brain_service.config import get_settings
 from services.brain_service.handlers.pir_subscriber import PIRSubscriber
@@ -69,7 +70,7 @@ async def lifespan(app: FastAPI):
         )
 
         # Presence checks (raise SecretLoadError via fail_fast if missing).
-        secrets.get_claude_api_key()
+        api_key = secrets.get_claude_api_key()
         secrets.get_slack_bot_token()
 
         secrets.get_jira_api_token()
@@ -77,11 +78,14 @@ async def lifespan(app: FastAPI):
 
         logger.info("service.secrets_loaded", msg="Secrets and credentials loaded successfully")
 
+        # Initialize once without an API call; reuse this exact provider for work.
+        provider = ClaudePIRProvider(model=config.claude_model, api_key=api_key)
+
         # --- Initialize Redis ---
         logger.info("service.initializing_redis", redis_url=config.redis_url)
 
         redis_client = redis.from_url(
-            config.redis_url,
+            config.redis_url.get_secret_value(),
             encoding="utf-8",
             decode_responses=True,
             socket_connect_timeout=config.redis_timeout
@@ -117,7 +121,8 @@ async def lifespan(app: FastAPI):
             pir_completed_channel=config.pir_completed_channel,
             channel_tracking_ttl_seconds=config.channel_tracking_ttl_seconds,
             slack_message_limit=config.slack_message_limit,
-            jira_server=config.jira_server
+            jira_server=config.jira_server,
+            pir_provider=provider,
         )
 
         logger.info(
@@ -153,7 +158,7 @@ async def lifespan(app: FastAPI):
     except SecretLoadError as e:
         logger.critical(
             "service.secret_load_failed",
-            error=str(e),
+            error=type(e).__name__,
             msg="Cannot start service without required secrets"
         )
         sys.exit(1)
@@ -161,7 +166,7 @@ async def lifespan(app: FastAPI):
     except redis.RedisError as e:
         logger.critical(
             "service.redis_connection_failed",
-            error=str(e),
+            error=type(e).__name__,
             msg="Cannot start service without Redis connectivity"
         )
         sys.exit(1)
@@ -169,7 +174,7 @@ async def lifespan(app: FastAPI):
     except Exception as e:
         logger.critical(
             "service.startup_failed",
-            error=str(e),
+            error=type(e).__name__,
             error_type=type(e).__name__,
             msg="Unexpected error during service startup"
         )
@@ -194,7 +199,7 @@ async def lifespan(app: FastAPI):
     try:
         await redis_client.aclose()
     except Exception as e:  # non-fatal: we are already shutting down
-        logger.warning("service.redis_close_failed", error=str(e))
+        logger.warning("service.redis_close_failed", error=type(e).__name__)
 
     logger.info("service.stopped", msg="Coreline-Brain Service stopped cleanly")
 

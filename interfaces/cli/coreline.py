@@ -1699,6 +1699,8 @@ def doctor(home: Optional[str] = typer.Option(None, "--home")):
         table.add_row("custody chain", "intact" if v["custody_chain"] else "broken")
         table.add_row("audit chain", "intact" if v["audit_chain"] else "broken")
         table.add_row("storage artifacts", "verified" if v["storage_artifacts"] else "failed")
+        if not _verification_ok(v):
+            problems.append("active incident integrity verification failed")
         if not v["manifest_signature"]:
             problems.append("active manifest signature invalid")
         if not v["custody_chain"]:
@@ -1745,7 +1747,10 @@ def verify(
                 min_sequence=min_sequence if min_sequence is not None else 0,
             )
         except (RegistryError, OSError, ValueError, KeyError, TypeError) as e:
-            console.print(Text(f"registry verification failed: {e}", style=C_BAD))
+            reason = "trust data unreadable or invalid"
+            if isinstance(e, RegistryError) and "below floor" in str(e):
+                reason = "registry sequence below floor"
+            console.print(Text(f"registry verification failed: {reason}", style=C_BAD))
             raise typer.Exit(code=1)
     workspaces = []
     try:
@@ -1783,10 +1788,7 @@ def verify(
 
 
 def _verification_ok(v: dict) -> bool:
-    return all(
-        bool(v[key])
-        for key in ("manifest_signature", "custody_chain", "audit_chain", "storage_artifacts")
-    )
+    return v.get("ok") is True
 
 
 def _verification_panel(ws: IncidentWorkspace, v: dict, ok: bool) -> Panel:
@@ -1800,6 +1802,8 @@ def _verification_panel(ws: IncidentWorkspace, v: dict, ok: bool) -> Panel:
     table.add_row("custody", "intact" if v["custody_chain"] else f"broken @ {v['custody_bad_index']}")
     table.add_row("audit", "intact" if v["audit_chain"] else f"broken @ seq {v['audit_bad_seq']}")
     table.add_row("storage", "verified" if v["storage_artifacts"] else "failed")
+    for key in ("subjects", "observations", "claims", "actions", "decisions", "case_graph"):
+        table.add_row(key.replace("_", " "), "verified" if v[key] else "failed")
     table.add_row("signer trust", v.get("signer_trust", "not checked (use --trusted)"))
     if "trust_reason" in v:
         table.add_row("trust reason", Text(v["trust_reason"]))

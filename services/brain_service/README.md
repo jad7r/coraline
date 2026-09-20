@@ -15,7 +15,10 @@ status (default `Resolved`). Providing credentials does not enable real collecti
 `PIRProvider` is the replaceable advisory generation interface. Direct provider
 usage can select `FakePIRProvider` without an API key, and tests inject fakes.
 The running HTTP service nevertheless requires Anthropic, Slack, Jira token,
-and Jira email credentials at startup, plus Redis. It does not currently offer
+and Jira email credentials at startup, plus Redis and an installed `anthropic`
+SDK. Startup constructs the provider without making an upstream API request.
+A configured provider that cannot initialize fails startup; it never silently
+substitutes a fake provider. It does not currently offer
 a credential-free offline server mode.
 
 ## Run locally
@@ -24,6 +27,7 @@ Export a filled-in copy of [.env.template](.env.template) using the shared setup
 instructions, then run from the repository root:
 
 ```bash
+.venv/bin/python -m pip install anthropic
 .venv/bin/python -m services.brain_service.main
 ```
 
@@ -41,8 +45,10 @@ path. The template uses `/tmp/coreline-pirs`; the code default is `/output/pirs`
 | `CORELINE_SLACK_MESSAGE_LIMIT` | `1000` | Passed to the placeholder assembler |
 
 See [config.py](config.py) for all settings. `GET /health` is a liveness check.
-`GET /ready` checks Redis and credential presence through the shared environment/keychain
-resolver used at startup. It does not validate credentials against upstream APIs. `POST /pir/generate` accepts an `IncidentEvent` and returns
+`GET /ready` pings Redis and checks that the orchestrator holds an initialized
+provider. The `credentials` compatibility field and `provider` field refer to
+that loaded configuration. It does not validate credentials or model availability
+against upstream APIs. Restart to pick up changed environment/keychain credentials. `POST /pir/generate` accepts an `IncidentEvent` and returns
 `incident_id`, `generated`, `pir_path`, and `preview`.
 
 ## Validation

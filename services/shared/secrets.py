@@ -53,23 +53,33 @@ def _secret_names(env_var: str) -> tuple[str, ...]:
     return tuple(f"CORELINE_{alias}" for alias in aliases) + aliases
 
 
+def _valid_secret(value: object) -> bool:
+    # Reject malformed backends and blank credentials without changing meaningful
+    # whitespace in an HMAC secret. Never coerce or render an unknown object.
+    return isinstance(value, str) and bool(value.strip())
+
+
 def read_secret(env_var: str, *, keychain_key: Optional[str] = None) -> Optional[str]:
     """Resolve a secret consistently for startup, providers, and readiness."""
     names = _secret_names(env_var)
     for name in names:
         value = os.environ.get(name)
-        if value:
+        if _valid_secret(value):
             return value
     key = keychain_key or names[0].removeprefix("CORELINE_").lower()
     # The original shared accessor used claude_api_key, not anthropic_api_key.
     keys = (key, "claude_api_key") if names[0] == "CORELINE_ANTHROPIC_API_KEY" else (key,)
     for candidate in dict.fromkeys(keys):
         value = _keychain_get(candidate)
-        if value:
+        if _valid_secret(value):
             return value
     for name in names:
         value = _keychain_get(name, "secops-secure-enclave")
-        if value:
+        if _valid_secret(value):
+            return value
+    if names[0] == "CORELINE_JIRA_WEBHOOK_SECRET":
+        value = _keychain_get("jira-webhook-secret", "coreline-jira-webhook-listener")
+        if _valid_secret(value):
             return value
     return None
 

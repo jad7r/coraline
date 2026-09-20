@@ -136,7 +136,7 @@ class PIROrchestrator:
             logger.error(
                 "pir_orchestrator.status_check_failed",
                 incident_id=incident_id,
-                error=str(e),
+                error=type(e).__name__,
                 msg="Failed to check incident status (skipping PIR generation)"
             )
             return None
@@ -172,7 +172,7 @@ class PIROrchestrator:
             logger.warning(
                 "pir_orchestrator.channel_lookup_failed",
                 incident_id=incident_id,
-                error=str(e),
+                error=type(e).__name__,
                 msg="Failed to lookup Slack channel (continuing without Slack data)"
             )
             channel_id = None
@@ -207,10 +207,10 @@ class PIROrchestrator:
             return str(pir_path)
 
         except Exception as e:
-            logger.exception(
+            logger.error(
                 "pir_orchestrator.generation_failed",
                 incident_id=incident_id,
-                error=str(e),
+                error=type(e).__name__,
                 error_type=type(e).__name__,
                 msg="PIR generation failed"
             )
@@ -236,7 +236,7 @@ class PIROrchestrator:
                 logger.error(
                     "pir_orchestrator.jira_fetch_failed",
                     incident_id=incident_id,
-                    error=str(e),
+                    error=type(e).__name__,
                     msg="Failed to fetch Jira metadata"
                 )
                 raise
@@ -287,7 +287,7 @@ class PIROrchestrator:
                 logger.error(
                     "pir_orchestrator.generation_error",
                     incident_id=incident_id,
-                    error=str(e),
+                    error=type(e).__name__,
                     msg="Error during PIR generation"
                 )
                 raise
@@ -327,7 +327,7 @@ class PIROrchestrator:
             logger.error(
                 "pir_orchestrator.publish_failed",
                 incident_id=incident_id,
-                error=str(e),
+                error=type(e).__name__,
                 msg="Failed to publish completion event (non-fatal)"
             )
 

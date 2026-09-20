@@ -48,7 +48,10 @@ async def generate_pir(incident: IncidentEvent, request: Request):
         msg="PIR generation requested via HTTP",
     )
 
-    pir_path = await orchestrator.generate_pir_for_incident(incident)
+    try:
+        pir_path = await orchestrator.generate_pir_for_incident(incident)
+    except Exception:
+        raise HTTPException(status_code=503, detail="PIR generation unavailable") from None
 
     if not pir_path:
         # Orchestrator ran but skipped (status not eligible, or PIR already exists).

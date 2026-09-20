@@ -143,3 +143,11 @@ def test_webhook_internal_error_body_is_generic(client, monkeypatch):
     assert resp.status_code == 500
     assert resp.get_json()["error"] == "Internal error processing webhook"
     assert "secret internal detail" not in resp.get_data(as_text=True)
+
+
+@pytest.mark.parametrize('secret', ['', ' \t'])
+def test_missing_secret_never_bypasses_authentication(client, monkeypatch, secret):
+    from services.grafana_webhook import main
+    monkeypatch.setattr(main, 'WEBHOOK_SECRET', secret)
+    response = client.post('/webhook', json={'event_type': 'incident.created', 'incident': {'id': 'x'}})
+    assert response.status_code == 401

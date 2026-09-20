@@ -97,7 +97,7 @@ async def readiness_probe(request: Request):
     except Exception as e:
         logger.error(
             "readiness_probe.failed",
-            error=str(e),
+            error=type(e).__name__,
             error_type=type(e).__name__,
             msg="Readiness probe failed"
         )
@@ -106,6 +106,6 @@ async def readiness_probe(request: Request):
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             content={
                 "status": "not_ready",
-                "reason": str(e)
+                "reason": "Service dependency unavailable"
             }
         )

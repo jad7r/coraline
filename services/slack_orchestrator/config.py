@@ -9,7 +9,7 @@ All environment variables use CORELINE_ prefix for consistency.
 from pathlib import Path
 
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
-from pydantic import Field, field_validator
+from pydantic import SecretStr, Field, field_validator
 from typing import Annotated, Literal
 import json
 
@@ -24,6 +24,7 @@ class Settings(BaseSettings):
         # current working directory (the app is launched from the repo root).
         env_file=str(Path(__file__).resolve().parent / ".env"),
         env_file_encoding="utf-8",
+        hide_input_in_errors=True,
     )
 
     # === Core Settings ===
@@ -51,7 +52,7 @@ class Settings(BaseSettings):
     )
 
     # === Redis Settings ===
-    redis_url: str = Field(
+    redis_url: SecretStr = Field(
         default="redis://localhost:6379/0",
         description="Redis connection URL for Pub/Sub"
     )

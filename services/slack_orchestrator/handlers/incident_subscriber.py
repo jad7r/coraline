@@ -88,9 +88,9 @@ class IncidentSubscriber:
                     break
 
                 except Exception as e:
-                    logger.exception(
+                    logger.error(
                         "incident_subscriber.loop_error",
-                        error=str(e),
+                        error=type(e).__name__,
                         msg="Error in subscriber loop (continuing)"
                     )
                     # Continue processing (don't crash subscriber)
@@ -109,7 +109,7 @@ class IncidentSubscriber:
             except Exception as e:
                 logger.error(
                     "incident_subscriber.cleanup_error",
-                    error=str(e),
+                    error=type(e).__name__,
                     msg="Error during subscriber cleanup"
                 )
 
@@ -137,8 +137,7 @@ class IncidentSubscriber:
             except ValidationError as e:
                 logger.error(
                     "incident_subscriber.validation_error",
-                    validation_errors=e.errors(),
-                    raw_data=incident_dict,
+                    validation_error_count=e.error_count(),
                     msg="Invalid incident event schema (skipping)"
                 )
                 return
@@ -163,10 +162,10 @@ class IncidentSubscriber:
                 )
 
             except Exception as e:
-                logger.exception(
+                logger.error(
                     "incident_subscriber.callback_error",
                     incident_id=incident.incident_id,
-                    error=str(e),
+                    error=type(e).__name__,
                     error_type=type(e).__name__,
                     msg="Error in incident callback (non-fatal, continuing)"
                 )
@@ -174,15 +173,15 @@ class IncidentSubscriber:
         except json.JSONDecodeError as e:
             logger.error(
                 "incident_subscriber.invalid_json",
-                error=str(e),
-                raw_data=data[:100] if len(data) > 100 else data,
+                error=type(e).__name__,
+                data_length=len(data),
                 msg="Failed to parse incident event JSON (skipping)"
             )
 
         except Exception as e:
-            logger.exception(
+            logger.error(
                 "incident_subscriber.processing_error",
-                error=str(e),
+                error=type(e).__name__,
                 error_type=type(e).__name__,
                 msg="Unexpected error processing incident event"
             )

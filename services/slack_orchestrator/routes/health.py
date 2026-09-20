@@ -62,7 +62,7 @@ async def readiness_check(request: Request):
     except (redis.RedisError, AttributeError) as e:
         logger.warning(
             "health.redis_check_failed",
-            error=str(e),
+            error=type(e).__name__,
             msg="Redis health check failed"
         )
 
@@ -74,7 +74,7 @@ async def readiness_check(request: Request):
     except (SlackApiError, AttributeError) as e:
         logger.warning(
             "health.slack_check_failed",
-            error=str(e),
+            error=type(e).__name__,
             msg="Slack health check failed"
         )
 

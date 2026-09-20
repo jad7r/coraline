@@ -34,9 +34,24 @@ in this order: prefixed environment names, unprefixed environment names, the
 
 The legacy `secops-secure-enclave` namespace accepts the environment-style names
 in the same order shown above. Existing unprefixed environment variables and
-keychain entries remain supported. Empty values fall through to the next source;
+keychain entries remain supported. Jira additionally falls back to its original
+`coreline-jira-webhook-listener` service and `jira-webhook-secret` account after
+the other keychains. Empty or whitespace-only values and non-string keychain
+responses are absent; meaningful whitespace in a nonblank secret is preserved.
+Such absent values fall through to the next source;
 an unavailable keychain is treated as absent. Required missing secrets fail startup.
-Brain startup, provider selection, and readiness use the same resolver.
+Brain startup uses this resolver and initializes the provider once. Readiness
+checks the provider actually held by the orchestrator, not freshly read credentials
+that might differ from the running configuration. Restart after credential rotation.
+Redis URLs are represented as masked `SecretStr` values in settings and diagnostics;
+only connection construction unwraps them.
+
+This contract applies to the three FastAPI services above. The separate Grafana
+experiment reads `WEBHOOK_SECRET` directly and rejects webhooks when it is blank.
+The VirusTotal/MISP clients in `lib/` intentionally retain their documented
+explicit-argument, `coreline-secrets` keychain, then legacy-environment precedence.
+Google OAuth and incident signing keys have separate custody mechanisms; service
+API credentials never select a core incident signer.
 
 ## Local startup
 

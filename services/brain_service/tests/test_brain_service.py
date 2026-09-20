@@ -10,7 +10,6 @@ incident event, asserting a 2xx and a PIR-shaped response.
 """
 
 import unittest
-from unittest.mock import patch
 import asyncio
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -131,16 +130,13 @@ class TestHealthRoute(unittest.TestCase):
             self.assertEqual(body["status"], "healthy")
             self.assertEqual(body["service"], "coreline-brain-service")
 
-    def test_ready_reports_redis_healthy(self):
-        # Credentials are absent offline, so /ready returns 503, but the payload
-        # must still show the fakeredis check passing.
+    def test_ready_with_explicit_offline_provider(self):
         with TemporaryDirectory() as d:
             app = _build_offline_app(Path(d))
-            with patch("services.shared.secrets.read_secret", return_value=None):
-                with self.assertRaises(HTTPException) as ctx:
-                    _run(health.readiness_check(_request_for(app)))
-            self.assertEqual(ctx.exception.status_code, 503)
-            self.assertTrue(ctx.exception.detail["checks"]["redis"])
+            body = _run(health.readiness_check(_request_for(app)))
+            self.assertTrue(body["checks"]["redis"])
+            self.assertTrue(body["checks"]["provider"])
+
 
 
 class TestPIRRoute(unittest.TestCase):

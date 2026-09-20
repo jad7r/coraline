@@ -76,7 +76,7 @@ class DuplicateTracker:
             logger.warning(
                 "duplicate_tracker.redis_error",
                 incident_id=incident_id,
-                error=str(e),
+                error=type(e).__name__,
                 msg="Redis error checking duplicate (allowing channel creation)"
             )
             return (False, None)
@@ -111,7 +111,7 @@ class DuplicateTracker:
                 "duplicate_tracker.mark_failed",
                 incident_id=incident_id,
                 channel_id=channel_id,
-                error=str(e),
+                error=type(e).__name__,
                 msg="Failed to mark channel as created (non-fatal)"
             )
 
@@ -147,5 +147,5 @@ class DuplicateTracker:
             logger.warning(
                 "duplicate_tracker.clear_failed",
                 incident_id=incident_id,
-                error=str(e)
+                error=type(e).__name__
             )

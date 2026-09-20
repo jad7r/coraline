@@ -169,7 +169,7 @@ class WebhookHandler:
                 duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
 
                 self.audit_logger.log_validation_error(
-                    error_message=f"Invalid JSON: {str(e)}",
+                    error_message="Invalid JSON",
                     source_ip=source_ip
                 )
 
@@ -185,7 +185,7 @@ class WebhookHandler:
 
                 validation_errors = e.errors()
                 self.audit_logger.log_validation_error(
-                    error_message=f"Schema validation failed: {str(e)}",
+                    error_message="Schema validation failed",
                     source_ip=source_ip,
                     validation_errors=validation_errors
                 )
@@ -315,9 +315,9 @@ class WebhookHandler:
             # Unexpected error - log and return 500
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
 
-            logger.exception(
+            logger.error(
                 "webhook_handler.unexpected_error",
-                error=str(e),
+                error=type(e).__name__,
                 error_type=type(e).__name__,
                 duration_ms=duration_ms,
                 msg="Unexpected error processing webhook"
@@ -326,7 +326,7 @@ class WebhookHandler:
             self.audit_logger.log_custom_event(
                 event_type="JIRA_WEBHOOK_RECEIVED",
                 success=False,
-                error_message=str(e),
+                error_message="Dependency operation failed",
                 error_code="INTERNAL_ERROR",
                 duration_ms=duration_ms
             )
@@ -380,17 +380,17 @@ class WebhookHandler:
             logger.error(
                 "webhook_handler.publish_failed",
                 incident_id=webhook.get_incident_id(),
-                error=str(e),
+                error=type(e).__name__,
                 error_type=type(e).__name__,
                 msg="Failed to publish to Slack (incident still logged, non-fatal)"
             )
 
         except Exception as e:
             # Unexpected error - log but don't fail
-            logger.exception(
+            logger.error(
                 "webhook_handler.publish_unexpected_error",
                 incident_id=webhook.get_incident_id(),
-                error=str(e),
+                error=type(e).__name__,
                 error_type=type(e).__name__,
                 msg="Unexpected error publishing to Slack (non-fatal)"
             )

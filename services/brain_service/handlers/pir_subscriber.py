@@ -89,9 +89,9 @@ class PIRSubscriber:
                     break
 
                 except Exception as e:
-                    logger.exception(
+                    logger.error(
                         "pir_subscriber.loop_error",
-                        error=str(e),
+                        error=type(e).__name__,
                         msg="Error in subscriber loop (continuing)"
                     )
                     # Continue processing (don't crash subscriber)
@@ -110,7 +110,7 @@ class PIRSubscriber:
             except Exception as e:
                 logger.error(
                     "pir_subscriber.cleanup_error",
-                    error=str(e),
+                    error=type(e).__name__,
                     msg="Error during PIR subscriber cleanup"
                 )
 
@@ -138,8 +138,7 @@ class PIRSubscriber:
             except ValidationError as e:
                 logger.error(
                     "pir_subscriber.validation_error",
-                    validation_errors=e.errors(),
-                    raw_data=incident_dict,
+                    validation_error_count=e.error_count(),
                     msg="Invalid incident event schema (skipping)"
                 )
                 return
@@ -172,10 +171,10 @@ class PIRSubscriber:
                     )
 
             except Exception as e:
-                logger.exception(
+                logger.error(
                     "pir_subscriber.callback_error",
                     incident_id=incident.incident_id,
-                    error=str(e),
+                    error=type(e).__name__,
                     error_type=type(e).__name__,
                     msg="Error in PIR generation callback (non-fatal, continuing)"
                 )
@@ -183,15 +182,15 @@ class PIRSubscriber:
         except json.JSONDecodeError as e:
             logger.error(
                 "pir_subscriber.invalid_json",
-                error=str(e),
-                raw_data=data[:100] if len(data) > 100 else data,
+                error=type(e).__name__,
+                data_length=len(data),
                 msg="Failed to parse incident event JSON (skipping)"
             )
 
         except Exception as e:
-            logger.exception(
+            logger.error(
                 "pir_subscriber.processing_error",
-                error=str(e),
+                error=type(e).__name__,
                 error_type=type(e).__name__,
                 msg="Unexpected error processing incident event"
             )

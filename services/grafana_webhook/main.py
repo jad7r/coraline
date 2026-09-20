@@ -61,9 +61,9 @@ def verify_signature(payload: bytes, signature: str) -> bool:
     Returns:
         True if valid
     """
-    if not WEBHOOK_SECRET:
-        logger.warning("WEBHOOK_SECRET not set - skipping signature verification")
-        return True
+    if not WEBHOOK_SECRET.strip():
+        logger.warning("WEBHOOK_SECRET not set - rejecting webhook")
+        return False
 
     expected = hmac.new(
         WEBHOOK_SECRET.encode(),
@@ -132,7 +132,7 @@ def webhook():
 
     except Exception:
         # Log full detail server-side; never leak internals to the caller.
-        logger.error("Error processing webhook", exc_info=True)
+        logger.error("Error processing webhook")
         return jsonify({'error': 'Internal error processing webhook'}), 500
 
 

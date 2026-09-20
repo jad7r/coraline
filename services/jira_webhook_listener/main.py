@@ -83,7 +83,7 @@ async def lifespan(app: FastAPI):
     except SecretLoadError as e:
         logger.critical(
             "service.secret_load_failed",
-            error=str(e),
+            error=type(e).__name__,
             msg="Cannot start service without webhook secret"
         )
         sys.exit(1)
@@ -97,7 +97,7 @@ async def lifespan(app: FastAPI):
         )
 
         redis_client = redis.from_url(
-            config.redis_url,
+            config.redis_url.get_secret_value(),
             encoding="utf-8",
             decode_responses=True,
             socket_connect_timeout=config.redis_timeout
@@ -114,7 +114,7 @@ async def lifespan(app: FastAPI):
     except redis.RedisError as e:
         logger.critical(
             "service.redis_connection_failed",
-            error=str(e),
+            error=type(e).__name__,
             error_type=type(e).__name__,
             msg="Cannot start service without Redis"
         )

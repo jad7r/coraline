@@ -13,7 +13,7 @@ Environment Variables:
     CORELINE_PORT: HTTP server port (default: 8080)
 """
 
-from pydantic import Field, validator
+from pydantic import SecretStr, Field, validator
 from pydantic_settings import BaseSettings
 from typing import Literal
 
@@ -46,7 +46,7 @@ class Settings(BaseSettings):
     )
 
     # === Redis Settings ===
-    redis_url: str = Field(
+    redis_url: SecretStr = Field(
         default="redis://localhost:6379/0",
         description="Redis connection URL for replay prevention"
     )
@@ -140,6 +140,7 @@ class Settings(BaseSettings):
         # Load from .env file if present (for local development)
         env_file = ".env"
         env_file_encoding = "utf-8"
+        hide_input_in_errors = True
 
 
 # Global settings instance

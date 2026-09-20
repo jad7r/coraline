@@ -131,6 +131,7 @@ class AuditEntry:
     action: str
     detail: Dict[str, Any]
     prev_hash: Optional[str]
+    stored_hash: Optional[str] = field(default=None, repr=False, compare=False)
 
     def _content(self) -> Dict[str, Any]:
         return {
@@ -154,8 +155,10 @@ class AuditEntry:
 def verify_audit(entries: List[AuditEntry]) -> Tuple[bool, Optional[int]]:
     """Recompute the hash linkage. Returns (ok, first_bad_seq)."""
     expected_prev: Optional[str] = None
-    for e in entries:
-        if e.prev_hash != expected_prev:
+    for index, e in enumerate(entries, 1):
+        if (type(e.seq) is not int or e.seq != index or
+                (e.stored_hash is not None and e.stored_hash != e.entry_hash()) or
+                e.prev_hash != expected_prev):
             return False, e.seq
         expected_prev = e.entry_hash()
     return True, None
@@ -892,7 +895,7 @@ class IncidentWorkspace:
             return []
         return sorted(
             p.name for p in home.iterdir()
-            if p.is_dir() and (p / "state.json").exists()
+            if p.is_dir() and ((p / "state.json").exists() or p.name.startswith("INC-"))
         )
 
     # -- construction ---------------------------------------------------------- #
@@ -959,8 +962,15 @@ class IncidentWorkspace:
         ws = cls(home=home, incident_id=incident_id)
         if not ws._state_path.exists():
             raise WorkspaceError(f"no such incident: {incident_id} (under {home})")
-        ws.state = json.loads(ws._state_path.read_text(encoding="utf-8"))
-        ws.state["status"] = canonical_status(ws.state.get("status"))
+        try:
+            ws.state = json.loads(ws._state_path.read_text(encoding="utf-8"))
+            if not isinstance(ws.state, dict) or ws.state.get("incident_id") != incident_id:
+                raise ValueError("invalid state")
+            ws.state["status"] = canonical_status(ws.state.get("status"))
+            if ws.state["status"] not in LIFECYCLE:
+                raise ValueError("invalid status")
+        except (OSError, ValueError, TypeError, AttributeError):
+            raise WorkspaceError("incident state unreadable or malformed") from None
         return ws
 
     @classmethod
@@ -1112,6 +1122,7 @@ class IncidentWorkspace:
                 seq=d["seq"], timestamp=d["timestamp"], actor=d["actor"],
                 action=d["action"], detail=d.get("detail", {}),
                 prev_hash=d.get("prev_hash"),
+                stored_hash=d.get("entry_hash") if isinstance(d.get("entry_hash"), str) else "",
             ))
         return entries
 
@@ -4013,29 +4024,35 @@ class IncidentWorkspace:
             except Exception:
                 result["custody_chain"] = False
         if manifest is not None:
-            storage = self._verify_storage_artifacts(manifest)
-            result.update(storage)
-        ok, bad_seq = verify_audit(self._load_audit())
-        result["audit_chain"] = ok
-        result["audit_bad_seq"] = bad_seq
-        subjects_ok, subject_errors = self.verify_subjects()
-        result["subjects"] = subjects_ok
-        result["subject_errors"] = subject_errors
-        observations_ok, observation_errors = self.verify_observations()
-        result["observations"] = observations_ok
-        result["observation_errors"] = observation_errors
-        claims_ok, claim_errors = self.verify_claims()
-        result["claims"] = claims_ok
-        result["claim_errors"] = claim_errors
-        actions_ok, action_errors = self.verify_actions()
-        result["actions"] = actions_ok
-        result["action_errors"] = action_errors
-        decisions_ok, decision_errors = self.verify_decisions()
-        result["decisions"] = decisions_ok
-        result["decision_errors"] = decision_errors
-        graph_ok, graph_errors = self.verify_case_graph()
-        result["case_graph"] = graph_ok
-        result["case_graph_errors"] = graph_errors
+            try:
+                result.update(self._verify_storage_artifacts(manifest))
+            except Exception:
+                result["storage_artifacts"] = False
+                result["storage_unverifiable"] = ["stored evidence unreadable or malformed"]
+        try:
+            entries = self._load_audit()
+            ok, bad_seq = verify_audit(entries)
+            result["audit_chain"] = bool(entries) and ok
+            result["audit_bad_seq"] = bad_seq
+        except Exception:
+            result["audit_chain"] = False
+        for key, error_key, verifier in (
+            ("subjects", "subject_errors", self.verify_subjects),
+            ("observations", "observation_errors", self.verify_observations),
+            ("claims", "claim_errors", self.verify_claims),
+            ("actions", "action_errors", self.verify_actions),
+            ("decisions", "decision_errors", self.verify_decisions),
+            ("case_graph", "case_graph_errors", self.verify_case_graph),
+        ):
+            try:
+                result[key], result[error_key] = verifier()
+            except Exception:
+                result[key], result[error_key] = False, ["record or audit data unreadable"]
+        # Core owns the aggregate verdict; interfaces must not omit record checks.
+        result["ok"] = all(result[key] for key in (
+            "manifest_signature", "custody_chain", "audit_chain", "storage_artifacts",
+            "subjects", "observations", "claims", "actions", "decisions", "case_graph",
+        ))
         return result
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:

@@ -266,7 +266,9 @@ key custody should be handled outside the incident workspace.
 
 `verify --trusted` checks the registry root seal and sequence floor, then requires
 the incident manifest signature to verify against a trusted, non-revoked registry
-key. It also runs the existing custody, audit, and local evidence storage checks.
+key. It also runs the core custody, audit, local evidence storage, Subject,
+Observation, Claim, Action, Decision, and Case Graph checks. The core owns the
+aggregate verdict; any failed record check also fails CLI verification.
 Any failed check exits with status 1; invalid option combinations exit with status 2.
 Use `--id` to target one incident or `--all` for the store. Custom trust files can
 be supplied with `--registry`, `--seal`, and `--root-verify`.
@@ -288,11 +290,12 @@ Baseline test gate:
 Current local baseline at this checkpoint:
 
 ```text
-396 passed, 1 skipped, 17 warnings, 6 subtests passed
+506 passed, 1 skipped, 28 warnings, 6 subtests passed
 ```
 
-An additional provider-selection regression passed in the focused secret suite
-(11 passed) after this full baseline run.
+The post-commit audit regression selection passed 127 tests. See the
+[architecture and security audit](docs/status/2026-09-19-post-commit-audit.md)
+for corrected defects and the limits of local incident integrity.
 
 Scrub check for old project naming: search the working tree for the previous project name
 while excluding `.git/`, `.venv/`, bytecode, and cache directories. The expected result is

@@ -142,7 +142,7 @@ class ReplayProtection:
             # Redis connection failed - fail-open
             logger.error(
                 "replay_protection.redis_error",
-                error=str(e),
+                error=type(e).__name__,
                 error_type=type(e).__name__,
                 webhook_id=webhook_id,
                 msg="Redis connection failed during duplicate check (failing open)"
@@ -193,7 +193,7 @@ class ReplayProtection:
         except redis.RedisError as e:
             logger.error(
                 "replay_protection.mark_failed",
-                error=str(e),
+                error=type(e).__name__,
                 error_type=type(e).__name__,
                 webhook_id=webhook_id,
                 msg="Failed to mark webhook as processed (Redis error)"

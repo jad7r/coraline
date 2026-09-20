@@ -48,3 +48,11 @@ and provider clients. No live integrations were exercised. Changes are uncommitt
    keep fake collector output clearly identified as advisory placeholder data.
 2. Revisit container deployment and the older Jira TESTING guide against actual
    runtime behavior before treating the integrations as production-ready.
+
+## Post-commit audit supersedes this handoff
+
+The audit of `9f9d463` found and corrected incomplete Jira resolver wiring, false
+positive CLI/provider verification, audit parsing weaknesses, and service secret
+exposure paths. See [the audit report](2026-09-19-post-commit-audit.md) for current
+validation, residual limits, and the next milestone. Earlier test counts and
+“uncommitted” statements above describe their original session checkpoints.

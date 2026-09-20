@@ -150,7 +150,7 @@ def test_tampering_audit_log_is_detected(home: Path, evidence_file: Path):
 
     v = ws.verify()
     assert v["audit_chain"] is False
-    assert v["audit_bad_seq"] == 2  # break surfaces at the following entry
+    assert v["audit_bad_seq"] == 1  # stored hash identifies the modified entry
 
 
 def test_tampering_manifest_breaks_signature(home: Path, evidence_file: Path):
@@ -1602,7 +1602,7 @@ def test_simulate_tamper_then_repair_roundtrip(home: Path, evidence_file: Path):
 
     assert ws.simulate_tamper() is True
     v = ws.verify()
-    assert v["audit_chain"] is False and v["audit_bad_seq"] == 2
+    assert v["audit_chain"] is False and v["audit_bad_seq"] == 1
     # tamper must NOT touch the manifest signature (granular detection)
     assert v["manifest_signature"] is True
 

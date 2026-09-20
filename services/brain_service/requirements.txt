@@ -6,8 +6,9 @@
 #
 # The INTEGRATIONS section holds optional, advisory providers (LLM, Jira, Slack,
 # cloud secrets). Their imports are deferred in _lib_shim.py, so they are NOT
-# required to import, boot, health-check, or run the offline PIR path. Install
-# them for live operation.
+# required to import modules or run injected offline provider tests. The HTTP
+# service requires the anthropic SDK and credentials at startup. Install it
+# explicitly for service operation.
 
 # === Web Framework (CORE) ===
 fastapi>=0.115.0

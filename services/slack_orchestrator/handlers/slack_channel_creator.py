@@ -168,15 +168,15 @@ class SlackChannelCreator:
             duration_ms = int((datetime.now() - start_time).total_seconds() * 1000)
             self.audit_logger.log_channel_creation_failed(
                 incident_id=incident.incident_id,
-                error_message=str(e),
+                error_message="Dependency operation failed",
                 error_code=type(e).__name__,
                 duration_ms=duration_ms
             )
 
-            logger.exception(
+            logger.error(
                 "slack_creator.failed",
                 incident_id=incident.incident_id,
-                error=str(e),
+                error=type(e).__name__,
                 duration_ms=duration_ms,
                 msg="Failed to create incident channel"
             )
@@ -295,7 +295,7 @@ class SlackChannelCreator:
             logger.warning(
                 "slack_creator.topic_set_failed",
                 channel_id=channel_id,
-                error=str(e),
+                error=type(e).__name__,
                 msg="Failed to set channel topic (non-fatal)"
             )
 
@@ -314,7 +314,7 @@ class SlackChannelCreator:
             logger.warning(
                 "slack_creator.description_set_failed",
                 channel_id=channel_id,
-                error=str(e),
+                error=type(e).__name__,
                 msg="Failed to set channel description (non-fatal)"
             )
 
@@ -350,8 +350,8 @@ class SlackChannelCreator:
             logger.error(
                 "slack_creator.invite_failed",
                 channel_id=channel_id,
-                error=str(e),
-                error_code=e.response.get('error'),
+                error=type(e).__name__,
+                error_code=type(e).__name__,
                 msg="Failed to invite team members (non-fatal, team can join manually)"
             )
 
@@ -448,6 +448,6 @@ class SlackChannelCreator:
             logger.error(
                 "slack_creator.initial_message_failed",
                 channel_id=channel_id,
-                error=str(e),
+                error=type(e).__name__,
                 msg="Failed to post initial message (non-fatal)"
             )

@@ -29,6 +29,7 @@ Secrets (LLM API keys, tokens) are read from the environment or the OS keychain
 from __future__ import annotations
 
 import os
+from urllib.parse import urlsplit, urlunsplit
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Protocol, runtime_checkable
 
@@ -96,15 +97,19 @@ class ClaudePIRProvider:
     """
 
     def __init__(self, model: str, api_key: Optional[str] = None) -> None:
-        api_key = api_key or read_secret("ANTHROPIC_API_KEY")
-        if not api_key:
+        api_key = api_key if api_key is not None else read_secret("ANTHROPIC_API_KEY")
+        if not isinstance(api_key, str) or not api_key.strip():
             raise SecretLoadError("ClaudePIRProvider requires an Anthropic API key.")
+        if not isinstance(model, str) or not model.strip():
+            raise SecretLoadError("ClaudePIRProvider requires a model.")
         try:
-            import anthropic  # deferred import - not needed for offline paths
-        except Exception as exc:  # pragma: no cover - SDK not installed in tests
-            raise SecretLoadError(f"anthropic SDK unavailable: {exc}") from exc
+            import anthropic
+            self._client = anthropic.Anthropic(api_key=api_key)
+        except Exception:
+            # SDK exceptions can contain credentials. Do not retain their text
+            # or exception chain in the public error.
+            raise SecretLoadError("Anthropic provider initialization failed.") from None
         self.model = model
-        self._client = anthropic.Anthropic(api_key=api_key)
 
     def generate(self, data_packet: str, *, max_tokens: int = 16000, temperature: float = 0.3) -> str:  # pragma: no cover - needs network
         message = self._client.messages.create(
@@ -124,11 +129,9 @@ def default_pir_provider(model: str) -> PIRProvider:
     This keeps AI strictly optional and advisory — with no key (e.g. offline /
     tests) the deterministic :class:`FakePIRProvider` is used automatically.
     """
-    if read_secret("ANTHROPIC_API_KEY"):
-        try:
-            return ClaudePIRProvider(model=model)
-        except SecretLoadError:  # pragma: no cover - defensive
-            logger.warning("brain.provider_fallback", msg="Falling back to offline PIR provider")
+    key = read_secret("ANTHROPIC_API_KEY")
+    if key:
+        return ClaudePIRProvider(model=model, api_key=key)
     return FakePIRProvider()
 
 
@@ -144,7 +147,9 @@ class JiraIncidentCollector:
     """
 
     def __init__(self, server: str = "https://pantheon.atlassian.net") -> None:
-        self.server = server
+        parsed = urlsplit(server)
+        self.server = urlunsplit((parsed.scheme, parsed.netloc.rsplit("@", 1)[-1],
+                                 parsed.path, "", ""))
 
     def get_incident_metadata(self, incident_id: str) -> Dict[str, Any]:
         return {
