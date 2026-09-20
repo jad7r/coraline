@@ -279,6 +279,38 @@ for rollback protection. Keep the pinned public key outside the writable workspa
 when independent trust is required. These local storage checks do not attest cloud
 retention settings.
 
+## Authenticated incident snapshots
+
+Signed checkpoints bind incident metadata, evidence/custody manifests, audit
+history, investigative records and amendments, and lifecycle/sealing state.
+They reuse Ed25519 and require an independently pinned public key; snapshot private
+keys must remain outside the incident store. Case Graphs and reports stay derived.
+
+```bash
+python -m interfaces.cli.coreline snapshot keygen --private-key /secure/snapshot.key
+python -m interfaces.cli.coreline snapshot create --signing-key /secure/snapshot.key
+python -m interfaces.cli.coreline snapshot list
+python -m interfaces.cli.coreline snapshot verify-chain
+```
+
+The default public pin is `<home>/trust/snapshot.verify.json`; use
+`CORELINE_SNAPSHOT_VERIFY_KEY` for an independently protected pin. Snapshot commands
+also support `--verify-key`. Historical signature validity, chain validity, and
+current-state equality are separate results. `snapshot compare-current INCIDENT
+SNAPSHOT_ID` exits nonzero on any difference. General `verify` and `doctor` reject
+broken snapshot history and captured audit-prefix rollback, while accepting normal
+live evolution. Incidents without snapshots remain compatible.
+
+Once snapshots exist, `lifecycle seal --snapshot-key /secure/snapshot.key` creates
+a final checkpoint of the sealed state. `snapshot report` renders its current
+attestation without modifying the sealed PIR. A local authenticated snapshot chain
+improves tamper evidence but cannot prove the latest local checkpoint was not
+deleted by an attacker controlling the entire local storage domain. Preserve a
+tip outside that domain and use `snapshot verify-chain --expected-tip ID_OR_DIGEST`.
+
+See the [snapshot specification and operator guide](docs/specs/authenticated-incident-snapshots-v1.md)
+for canonical format, portable verification, sealing recovery, and limitations.
+
 ## Verification
 
 Baseline test gate:
@@ -287,13 +319,15 @@ Baseline test gate:
 .venv/bin/python -m pytest core autonomous services lib interfaces/cli/tests interfaces/gui/tests -q
 ```
 
-Current local baseline at this checkpoint:
+Current authenticated-snapshot checkpoint:
 
 ```text
-506 passed, 1 skipped, 28 warnings, 6 subtests passed
+595 passed, 1 skipped, 28 warnings, 6 subtests passed
 ```
 
-The post-commit audit regression selection passed 127 tests. See the
+The incident/CLI regression selection passed 223 tests, including 89 new snapshot
+scenarios. See the [snapshot checkpoint assessment](docs/status/2026-09-20-authenticated-snapshots.md).
+The earlier post-commit audit regression selection passed 127 tests. See the
 [architecture and security audit](docs/status/2026-09-19-post-commit-audit.md)
 for corrected defects and the limits of local incident integrity.
 

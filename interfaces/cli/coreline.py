@@ -62,6 +62,8 @@ from core.evidence.registry import (
     verify_registry_seal,
 )
 from core.evidence.seal import load_seal, write_seal
+from interfaces.cli.snapshots import app as snapshot_app
+from core.incident.snapshots import SnapshotError, load_private_key, load_public_key
 
 # ---- theme ------------------------------------------------------------------- #
 
@@ -118,6 +120,7 @@ app.add_typer(action_app, name="action")
 app.add_typer(subject_app, name="subject")
 app.add_typer(decision_app, name="decision")
 app.add_typer(graph_app, name="graph")
+app.add_typer(snapshot_app, name="snapshot")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -1499,13 +1502,17 @@ def lifecycle_seal(
     incident_id: Optional[str] = typer.Option(None, "--id", help="Target incident (default: active)."),
     actor: Optional[str] = typer.Option(None, "--actor"),
     home: Optional[str] = typer.Option(None, "--home"),
+    snapshot_key: Optional[str] = typer.Option(None, "--snapshot-key", help="External private key for final checkpoint."),
+    snapshot_verify_key: Optional[str] = typer.Option(None, "--snapshot-verify-key", help="Pinned public snapshot key."),
 ):
     """Seal a closed incident after all integrity gates verify green."""
     ws = _load(home, incident_id)
     who = actor or default_actor()
     try:
-        ws.seal_incident(who)
-    except WorkspaceError as e:
+        ws.seal_incident(who,
+                         snapshot_signing_key=load_private_key(snapshot_key, ws.home) if snapshot_key else None,
+                         snapshot_verify_key=load_public_key(snapshot_verify_key, incident_dir=ws.dir) if snapshot_verify_key else None)
+    except (WorkspaceError, SnapshotError) as e:
         console.print(f"[{C_BAD}]✗ {e}[/]")
         raise typer.Exit(code=1)
 
@@ -1699,6 +1706,7 @@ def doctor(home: Optional[str] = typer.Option(None, "--home")):
         table.add_row("custody chain", "intact" if v["custody_chain"] else "broken")
         table.add_row("audit chain", "intact" if v["audit_chain"] else "broken")
         table.add_row("storage artifacts", "verified" if v["storage_artifacts"] else "failed")
+        table.add_row("snapshots", v["snapshot_health"]["status"])
         if not _verification_ok(v):
             problems.append("active incident integrity verification failed")
         if not v["manifest_signature"]:
@@ -1730,6 +1738,7 @@ def verify(
     seal: Optional[str] = typer.Option(None, "--seal", help="Registry seal path; requires --trusted."),
     root_verify: Optional[str] = typer.Option(None, "--root-verify", help="Pinned root public key JSON; requires --trusted."),
     min_sequence: Optional[int] = typer.Option(None, "--min-sequence", min=0, help="Registry sequence floor; requires --trusted."),
+    snapshot_verify_key: Optional[str] = typer.Option(None, "--snapshot-verify-key", help="Independent pinned public snapshot key."),
 ):
     """Verify manifests, custody, audit chain, and stored local evidence artifacts."""
     if all_incidents and incident_id:
@@ -1770,7 +1779,12 @@ def verify(
 
     failed = []
     for ws in workspaces:
-        v = ws.verify()
+        try:
+            snapshot_pin = load_public_key(snapshot_verify_key, incident_dir=ws.dir) if snapshot_verify_key else None
+        except SnapshotError:
+            console.print(Text("snapshot public verification key unavailable or invalid", style=C_BAD))
+            raise typer.Exit(code=1)
+        v = ws.verify(snapshot_verify_key=snapshot_pin)
         ok = _verification_ok(v)
         if trusted_registry is not None:
             trust = ws.verify_signer(trusted_registry)
@@ -1805,6 +1819,7 @@ def _verification_panel(ws: IncidentWorkspace, v: dict, ok: bool) -> Panel:
     for key in ("subjects", "observations", "claims", "actions", "decisions", "case_graph"):
         table.add_row(key.replace("_", " "), "verified" if v[key] else "failed")
     table.add_row("signer trust", v.get("signer_trust", "not checked (use --trusted)"))
+    table.add_row("snapshots", v["snapshot_health"]["status"])
     if "trust_reason" in v:
         table.add_row("trust reason", Text(v["trust_reason"]))
     table.add_row("manifest hash", Text(str(v.get("manifest_hash") or ""), style=C_DIM))

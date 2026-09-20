@@ -21,6 +21,7 @@ Persistence layout, under ``<home>/<incident_id>/``:
     keys/signing.key  base64 Ed25519 seed, mode 0600  (demo store; prod = OS keychain)
     store/          LocalFileBackend root — deposited copies of evidence bytes
     report.md       generated PIR
+    snapshots/      immutable authenticated checkpoint envelopes (external signing key)
 
 All timestamps are UTC. Stdlib + core + PyNaCl only.
 """
@@ -1249,13 +1250,24 @@ class IncidentWorkspace:
         return report_md
 
     @locked_mutation
-    def seal_incident(self, actor: str, when: Optional[datetime] = None) -> None:
+    def seal_incident(self, actor: str, when: Optional[datetime] = None, *,
+                      snapshot_signing_key=None, snapshot_verify_key=None) -> None:
         """Seal a closed incident after all integrity gates verify green."""
         if self.is_sealed:
             raise WorkspaceError(f"incident {self.incident_id} is already sealed")
         if canonical_status(self.state.get("status")) != "CLOSED":
             raise WorkspaceError("incident must be closed before it can be sealed")
-        blocking = [g for g in self.gates() if not g.passed]
+        from .snapshots import SnapshotStore
+        checkpoints = SnapshotStore(self, snapshot_verify_key)
+        chain = checkpoints.verify_chain()
+        if not chain["valid"]:
+            raise WorkspaceError("cannot seal incident; snapshot chain invalid")
+        snapshot_required = bool(chain["count"] or snapshot_signing_key is not None)
+        if snapshot_required:
+            if (snapshot_signing_key is None or checkpoints.key is None or
+                    signing.key_fingerprint(snapshot_signing_key.verify_key) != signing.key_fingerprint(checkpoints.key)):
+                raise WorkspaceError("snapshot-backed sealing requires a matching external signing key")
+        blocking = [g for g in self.gates(snapshot_verify_key=snapshot_verify_key) if not g.passed]
         if blocking:
             keys = ", ".join(g.key for g in blocking)
             raise WorkspaceError(f"cannot seal incident; unmet gates: {keys}")
@@ -1263,6 +1275,8 @@ class IncidentWorkspace:
         cur = canonical_status(self.state.get("status"))
         self.state["status"] = "SEALED"
         self.state["sealed"] = True
+        if snapshot_required:
+            self.state["snapshot_final_required"] = True
         self.state["updated_at"] = to_iso(when)
         self._save_state()
         self._append_audit(
@@ -1271,6 +1285,12 @@ class IncidentWorkspace:
             {"from": cur, "to": "SEALED"},
             when,
         )
+        if snapshot_required:
+            from .snapshots import SnapshotError
+            try:
+                checkpoints.create(snapshot_signing_key, actor, when)
+            except SnapshotError:
+                raise WorkspaceError("incident sealed but final snapshot missing; retry snapshot create with the external key") from None
 
     def evidence_items(self):
         """Evidence items in canonical order (for display)."""
@@ -3974,7 +3994,7 @@ class IncidentWorkspace:
         except Exception:
             return VerificationResult(Outcome.UNTRUSTED, None, "manifest or signer data unreadable")
 
-    def verify(self) -> Dict[str, Any]:
+    def verify(self, *, include_snapshots: bool = True, snapshot_verify_key=None) -> Dict[str, Any]:
         """Full integrity check: manifest signature, custody chain, audit chain, storage."""
         result: Dict[str, Any] = {
             "manifest_signature": False,
@@ -4053,7 +4073,32 @@ class IncidentWorkspace:
             "manifest_signature", "custody_chain", "audit_chain", "storage_artifacts",
             "subjects", "observations", "claims", "actions", "decisions", "case_graph",
         ))
+        if include_snapshots:
+            from .snapshots import SnapshotStore
+            result["snapshot_health"] = SnapshotStore(self, snapshot_verify_key).health()
+            result["snapshots"] = result["snapshot_health"]["valid"]
+            result["ok"] = result["ok"] and result["snapshots"]
         return result
+
+    def create_snapshot(self, signing_key, actor: str, *, verify_key=None, when=None):
+        from .snapshots import SnapshotStore
+        return SnapshotStore(self, verify_key).create(signing_key, actor, when)
+
+    def verify_snapshot(self, snapshot_id: str, *, verify_key=None):
+        from .snapshots import SnapshotStore
+        return SnapshotStore(self, verify_key).verify_snapshot(snapshot_id)
+
+    def verify_snapshot_chain(self, *, verify_key=None, expected_tip=None):
+        from .snapshots import SnapshotStore
+        return SnapshotStore(self, verify_key).verify_chain(expected_tip)
+
+    def verify_current_state_against_snapshot(self, snapshot_id: str, *, verify_key=None):
+        from .snapshots import SnapshotStore
+        return SnapshotStore(self, verify_key).compare_current(snapshot_id)
+
+    def snapshot_report(self, *, verify_key=None) -> str:
+        from .snapshots import SnapshotStore, report_section
+        return report_section(SnapshotStore(self, verify_key).health())
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
         missing: List[str] = []
@@ -4094,8 +4139,8 @@ class IncidentWorkspace:
         }
 
     # -- quality gates --------------------------------------------------------- #
-    def gates(self) -> List[Gate]:
-        v = self.verify()
+    def gates(self, *, snapshot_verify_key=None) -> List[Gate]:
+        v = self.verify(snapshot_verify_key=snapshot_verify_key)
         n_items = int(self.state.get("evidence_count", 0))
         report_exists = self.report_path.exists()
         return [
@@ -4133,6 +4178,8 @@ class IncidentWorkspace:
             Gate("case_graph", "Case graph projection is rebuildable", v["case_graph"],
                  "verified" if v["case_graph"]
                  else f"{len(v['case_graph_errors'])} issue(s)"),
+            Gate("snapshots", "Authenticated checkpoint history", v["snapshots"],
+                 v["snapshot_health"]["status"]),
             Gate("report", "PIR generated", report_exists,
                  "present" if report_exists else "not yet generated"),
         ]
@@ -4178,6 +4225,7 @@ class IncidentWorkspace:
         lines.append(f"- Chain of custody: **{'INTACT' if v['custody_chain'] else 'BROKEN'}**")
         lines.append(f"- Audit log: **{'TAMPER-EVIDENT / INTACT' if v['audit_chain'] else 'BROKEN'}**")
         lines.append("")
+        lines.append(self.snapshot_report())
         lines.append("## Evidence manifest")
         lines.append("")
         if manifest.items:
