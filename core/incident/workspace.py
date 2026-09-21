@@ -1251,23 +1251,31 @@ class IncidentWorkspace:
 
     @locked_mutation
     def seal_incident(self, actor: str, when: Optional[datetime] = None, *,
-                      snapshot_signing_key=None, snapshot_verify_key=None) -> None:
+                      snapshot_signing_key=None, snapshot_verify_key=None,
+                      anchor_config=None, anchor_signing_key=None) -> None:
         """Seal a closed incident after all integrity gates verify green."""
         if self.is_sealed:
             raise WorkspaceError(f"incident {self.incident_id} is already sealed")
         if canonical_status(self.state.get("status")) != "CLOSED":
             raise WorkspaceError("incident must be closed before it can be sealed")
         from .snapshots import SnapshotStore
+        from .anchors import AnchorManager, AnchorError
         checkpoints = SnapshotStore(self, snapshot_verify_key)
+        anchors = AnchorManager(self, anchor_config, snapshot_verify_key)
         chain = checkpoints.verify_chain()
         if not chain["valid"]:
             raise WorkspaceError("cannot seal incident; snapshot chain invalid")
-        snapshot_required = bool(chain["count"] or snapshot_signing_key is not None)
+        anchor_required_for_seal = bool(
+            anchors.entry and anchors.entry["policy"] in {"REQUIRED", "REQUIRED_FOR_SEAL"})
+        snapshot_required = bool(chain["count"] or snapshot_signing_key is not None or anchor_required_for_seal)
         if snapshot_required:
             if (snapshot_signing_key is None or checkpoints.key is None or
                     signing.key_fingerprint(snapshot_signing_key.verify_key) != signing.key_fingerprint(checkpoints.key)):
                 raise WorkspaceError("snapshot-backed sealing requires a matching external signing key")
-        blocking = [g for g in self.gates(snapshot_verify_key=snapshot_verify_key) if not g.passed]
+        if anchor_required_for_seal and anchor_signing_key is None:
+            raise WorkspaceError("anchor-backed sealing requires an external anchor signing key")
+        blocking = [g for g in self.gates(snapshot_verify_key=snapshot_verify_key,
+                                          anchor_config=anchor_config) if not g.passed]
         if blocking:
             keys = ", ".join(g.key for g in blocking)
             raise WorkspaceError(f"cannot seal incident; unmet gates: {keys}")
@@ -1291,6 +1299,14 @@ class IncidentWorkspace:
                 checkpoints.create(snapshot_signing_key, actor, when)
             except SnapshotError:
                 raise WorkspaceError("incident sealed but final snapshot missing; retry snapshot create with the external key") from None
+        if anchor_required_for_seal:
+            try:
+                final_id = checkpoints.verify_chain()["latest"]["payload"]["snapshot_id"]
+                anchors.anchor_snapshot(final_id, anchor_signing_key, when)
+                if not anchors.health()["anchor_policy_satisfied"]:
+                    raise AnchorError("expected tip not confirmed")
+            except AnchorError:
+                raise WorkspaceError("incident sealed but required final anchor is missing; retry anchoring the final snapshot") from None
 
     def evidence_items(self):
         """Evidence items in canonical order (for display)."""
@@ -3994,7 +4010,8 @@ class IncidentWorkspace:
         except Exception:
             return VerificationResult(Outcome.UNTRUSTED, None, "manifest or signer data unreadable")
 
-    def verify(self, *, include_snapshots: bool = True, snapshot_verify_key=None) -> Dict[str, Any]:
+    def verify(self, *, include_snapshots: bool = True, snapshot_verify_key=None,
+               include_anchors: bool = True, anchor_config=None, anchor_online: bool = True) -> Dict[str, Any]:
         """Full integrity check: manifest signature, custody chain, audit chain, storage."""
         result: Dict[str, Any] = {
             "manifest_signature": False,
@@ -4078,6 +4095,12 @@ class IncidentWorkspace:
             result["snapshot_health"] = SnapshotStore(self, snapshot_verify_key).health()
             result["snapshots"] = result["snapshot_health"]["valid"]
             result["ok"] = result["ok"] and result["snapshots"]
+        if include_anchors:
+            from .anchors import AnchorManager
+            result["anchor_health"] = AnchorManager(
+                self, anchor_config, snapshot_verify_key, anchor_online).health()
+            result["anchors"] = result["anchor_health"]["valid"]
+            result["ok"] = result["ok"] and result["anchors"]
         return result
 
     def create_snapshot(self, signing_key, actor: str, *, verify_key=None, when=None):
@@ -4099,6 +4122,36 @@ class IncidentWorkspace:
     def snapshot_report(self, *, verify_key=None) -> str:
         from .snapshots import SnapshotStore, report_section
         return report_section(SnapshotStore(self, verify_key).health())
+
+    def anchor_snapshot(self, snapshot_id: str, anchor_signing_key, *, anchor_config=None,
+                        snapshot_verify_key=None, acknowledged_at=None):
+        from .anchors import AnchorManager
+        return AnchorManager(self, anchor_config, snapshot_verify_key).anchor_snapshot(
+            snapshot_id, anchor_signing_key, acknowledged_at)
+
+    def anchor_health(self, *, anchor_config=None, snapshot_verify_key=None, online=True):
+        from .anchors import AnchorManager
+        return AnchorManager(self, anchor_config, snapshot_verify_key, online).health()
+
+    def list_anchor_receipts(self, *, anchor_config=None, snapshot_verify_key=None):
+        from .anchors import AnchorManager
+        return AnchorManager(self, anchor_config, snapshot_verify_key, False).list_receipts()
+
+    def get_anchor_receipt(self, receipt_id: str, *, anchor_config=None, snapshot_verify_key=None):
+        from .anchors import AnchorManager
+        return AnchorManager(self, anchor_config, snapshot_verify_key, False).get_receipt(receipt_id)
+
+    def verify_anchor_receipt(self, receipt_id: str, *, anchor_config=None, snapshot_verify_key=None):
+        from .anchors import AnchorManager
+        return AnchorManager(self, anchor_config, snapshot_verify_key, False).verify_anchor_receipt(receipt_id)
+
+    def get_expected_anchor_tip(self, *, anchor_config=None, snapshot_verify_key=None):
+        from .anchors import AnchorManager
+        return AnchorManager(self, anchor_config, snapshot_verify_key).get_expected_tip()
+
+    def anchor_report(self, *, anchor_config=None, snapshot_verify_key=None, online=True):
+        from .anchors import AnchorManager, report_section
+        return report_section(AnchorManager(self, anchor_config, snapshot_verify_key, online).health())
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
         missing: List[str] = []
@@ -4139,8 +4192,8 @@ class IncidentWorkspace:
         }
 
     # -- quality gates --------------------------------------------------------- #
-    def gates(self, *, snapshot_verify_key=None) -> List[Gate]:
-        v = self.verify(snapshot_verify_key=snapshot_verify_key)
+    def gates(self, *, snapshot_verify_key=None, anchor_config=None) -> List[Gate]:
+        v = self.verify(snapshot_verify_key=snapshot_verify_key, anchor_config=anchor_config)
         n_items = int(self.state.get("evidence_count", 0))
         report_exists = self.report_path.exists()
         return [
@@ -4180,6 +4233,8 @@ class IncidentWorkspace:
                  else f"{len(v['case_graph_errors'])} issue(s)"),
             Gate("snapshots", "Authenticated checkpoint history", v["snapshots"],
                  v["snapshot_health"]["status"]),
+            Gate("anchors", "Independent checkpoint anchor policy", v["anchors"],
+                 v["anchor_health"]["status"]),
             Gate("report", "PIR generated", report_exists,
                  "present" if report_exists else "not yet generated"),
         ]
@@ -4226,6 +4281,7 @@ class IncidentWorkspace:
         lines.append(f"- Audit log: **{'TAMPER-EVIDENT / INTACT' if v['audit_chain'] else 'BROKEN'}**")
         lines.append("")
         lines.append(self.snapshot_report())
+        lines.append(self.anchor_report())
         lines.append("## Evidence manifest")
         lines.append("")
         if manifest.items:

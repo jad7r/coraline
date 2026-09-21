@@ -311,6 +311,34 @@ tip outside that domain and use `snapshot verify-chain --expected-tip ID_OR_DIGE
 See the [snapshot specification and operator guide](docs/specs/authenticated-incident-snapshots-v1.md)
 for canonical format, portable verification, sealing recovery, and limitations.
 
+### Independent snapshot anchors
+
+Anchors move checkpoint identifiers and digests into a separately configured,
+signed receipt ledger. They let Coreline detect a local snapshot tail rollback when
+the independent ledger still expects a newer checkpoint. Anchors receive no incident
+content and never become incident-record authority.
+
+```bash
+python -m interfaces.cli.coreline anchor init --anchor-id vault-a \
+  --root /independent/coreline-anchor --private-key /secure/anchor.key
+python -m interfaces.cli.coreline anchor snapshot INC-EXAMPLE SNP-... \
+  --signing-key /secure/anchor.key
+python -m interfaces.cli.coreline anchor verify-tip INC-EXAMPLE
+python -m interfaces.cli.coreline anchor status INC-EXAMPLE --offline
+```
+
+`OPTIONAL` permits unanchored/local-ahead snapshots while rejecting invalid existing
+receipts and rollback. `REQUIRED` needs an online expected-tip match.
+`REQUIRED_FOR_SEAL` requires `lifecycle seal` to receive both `--snapshot-key` and
+`--anchor-key`. `LOCAL_AHEAD_OF_EXPECTED` is normal between anchors;
+`LOCAL_BEHIND_EXPECTED`, `DIVERGED`, and `LOCAL_SNAPSHOTS_MISSING` fail verification.
+Offline verification proves a pinned anchor signed a cached receipt, but cannot prove
+it is still the anchor's newest receipt.
+
+The filesystem adapter should reside outside the Coreline home, but a different path
+on one host may not constitute an independent security domain. See the
+[independent anchor specification](docs/specs/independent-snapshot-anchors-v1.md).
+
 ## Verification
 
 Baseline test gate:
@@ -322,11 +350,12 @@ Baseline test gate:
 Current authenticated-snapshot checkpoint:
 
 ```text
-595 passed, 1 skipped, 28 warnings, 6 subtests passed
+661 passed, 1 skipped, 28 warnings, 6 subtests passed
 ```
 
-The incident/CLI regression selection passed 223 tests, including 89 new snapshot
-scenarios. See the [snapshot checkpoint assessment](docs/status/2026-09-20-authenticated-snapshots.md).
+The incident/CLI regression selection passed 289 tests, including 89 snapshot and
+66 anchor scenarios. See the [anchor checkpoint assessment](docs/status/2026-09-20-independent-snapshot-anchors.md)
+and [snapshot checkpoint assessment](docs/status/2026-09-20-authenticated-snapshots.md).
 The earlier post-commit audit regression selection passed 127 tests. See the
 [architecture and security audit](docs/status/2026-09-19-post-commit-audit.md)
 for corrected defects and the limits of local incident integrity.

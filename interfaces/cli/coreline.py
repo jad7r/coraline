@@ -63,6 +63,8 @@ from core.evidence.registry import (
 )
 from core.evidence.seal import load_seal, write_seal
 from interfaces.cli.snapshots import app as snapshot_app
+from interfaces.cli.anchors import app as anchor_app
+from core.incident.anchors import AnchorError, load_registry as load_anchor_registry, registry_path as anchor_registry_path
 from core.incident.snapshots import SnapshotError, load_private_key, load_public_key
 
 # ---- theme ------------------------------------------------------------------- #
@@ -121,6 +123,7 @@ app.add_typer(subject_app, name="subject")
 app.add_typer(decision_app, name="decision")
 app.add_typer(graph_app, name="graph")
 app.add_typer(snapshot_app, name="snapshot")
+app.add_typer(anchor_app, name="anchor")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -1504,15 +1507,21 @@ def lifecycle_seal(
     home: Optional[str] = typer.Option(None, "--home"),
     snapshot_key: Optional[str] = typer.Option(None, "--snapshot-key", help="External private key for final checkpoint."),
     snapshot_verify_key: Optional[str] = typer.Option(None, "--snapshot-verify-key", help="Pinned public snapshot key."),
+    anchor_key: Optional[str] = typer.Option(None, "--anchor-key", help="External private key for required final anchor."),
+    anchor_registry: Optional[str] = typer.Option(None, "--anchor-registry", help="Trusted anchor registry path."),
 ):
     """Seal a closed incident after all integrity gates verify green."""
     ws = _load(home, incident_id)
     who = actor or default_actor()
     try:
+        anchor_config = load_anchor_registry(anchor_registry or anchor_registry_path(ws.home), incident_dir=ws.dir) \
+            if (anchor_registry or anchor_registry_path(ws.home).exists()) else None
         ws.seal_incident(who,
                          snapshot_signing_key=load_private_key(snapshot_key, ws.home) if snapshot_key else None,
-                         snapshot_verify_key=load_public_key(snapshot_verify_key, incident_dir=ws.dir) if snapshot_verify_key else None)
-    except (WorkspaceError, SnapshotError) as e:
+                         snapshot_verify_key=load_public_key(snapshot_verify_key, incident_dir=ws.dir) if snapshot_verify_key else None,
+                         anchor_config=anchor_config,
+                         anchor_signing_key=load_private_key(anchor_key, ws.home) if anchor_key else None)
+    except (WorkspaceError, SnapshotError, AnchorError) as e:
         console.print(f"[{C_BAD}]✗ {e}[/]")
         raise typer.Exit(code=1)
 
@@ -1707,6 +1716,8 @@ def doctor(home: Optional[str] = typer.Option(None, "--home")):
         table.add_row("audit chain", "intact" if v["audit_chain"] else "broken")
         table.add_row("storage artifacts", "verified" if v["storage_artifacts"] else "failed")
         table.add_row("snapshots", v["snapshot_health"]["status"])
+        table.add_row("anchor policy", v["anchor_health"]["policy"])
+        table.add_row("anchor", v["anchor_health"]["status"])
         if not _verification_ok(v):
             problems.append("active incident integrity verification failed")
         if not v["manifest_signature"]:
@@ -1739,6 +1750,8 @@ def verify(
     root_verify: Optional[str] = typer.Option(None, "--root-verify", help="Pinned root public key JSON; requires --trusted."),
     min_sequence: Optional[int] = typer.Option(None, "--min-sequence", min=0, help="Registry sequence floor; requires --trusted."),
     snapshot_verify_key: Optional[str] = typer.Option(None, "--snapshot-verify-key", help="Independent pinned public snapshot key."),
+    anchor_registry: Optional[str] = typer.Option(None, "--anchor-registry", help="Trusted anchor registry path."),
+    anchor_offline: bool = typer.Option(False, "--anchor-offline", help="Verify cached receipts without checking external expected tip."),
 ):
     """Verify manifests, custody, audit chain, and stored local evidence artifacts."""
     if all_incidents and incident_id:
@@ -1781,10 +1794,13 @@ def verify(
     for ws in workspaces:
         try:
             snapshot_pin = load_public_key(snapshot_verify_key, incident_dir=ws.dir) if snapshot_verify_key else None
-        except SnapshotError:
-            console.print(Text("snapshot public verification key unavailable or invalid", style=C_BAD))
+            anchor_config = load_anchor_registry(anchor_registry or anchor_registry_path(ws.home), incident_dir=ws.dir) \
+                if (anchor_registry or anchor_registry_path(ws.home).exists()) else None
+        except (SnapshotError, AnchorError):
+            console.print(Text("snapshot or anchor trust configuration unavailable or invalid", style=C_BAD))
             raise typer.Exit(code=1)
-        v = ws.verify(snapshot_verify_key=snapshot_pin)
+        v = ws.verify(snapshot_verify_key=snapshot_pin, anchor_config=anchor_config,
+                      anchor_online=not anchor_offline)
         ok = _verification_ok(v)
         if trusted_registry is not None:
             trust = ws.verify_signer(trusted_registry)
@@ -1820,6 +1836,8 @@ def _verification_panel(ws: IncidentWorkspace, v: dict, ok: bool) -> Panel:
         table.add_row(key.replace("_", " "), "verified" if v[key] else "failed")
     table.add_row("signer trust", v.get("signer_trust", "not checked (use --trusted)"))
     table.add_row("snapshots", v["snapshot_health"]["status"])
+    table.add_row("anchor policy", v["anchor_health"]["policy"])
+    table.add_row("anchor", v["anchor_health"]["status"])
     if "trust_reason" in v:
         table.add_row("trust reason", Text(v["trust_reason"]))
     table.add_row("manifest hash", Text(str(v.get("manifest_hash") or ""), style=C_DIM))

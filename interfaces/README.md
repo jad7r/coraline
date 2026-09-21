@@ -17,6 +17,12 @@ skill from "the product" to *one interface*.
   (general verify/seal) overrides it. Snapshot-backed sealing requires
   `lifecycle seal --snapshot-key` with an external private key. See the
   [snapshot guide](../docs/specs/authenticated-incident-snapshots-v1.md).
+  `anchor` creates and verifies independently signed checkpoint receipts, compares
+  local and expected tips, and supports explicit OPTIONAL, REQUIRED, and
+  REQUIRED_FOR_SEAL policies. The filesystem reference keeps its ledger/private key
+  outside Coreline home; `CORELINE_ANCHOR_REGISTRY` selects independently pinned
+  anchor trust. Offline receipt authenticity and online expected-tip freshness are
+  reported separately. See the [anchor guide](../docs/specs/independent-snapshot-anchors-v1.md).
 - `gui/` — optional Streamlit console over the same `core.incident` workspace.
 - `skill/` — the Claude Desktop skill front-end (`SKILL.md` + templates), re-pointed to
   call `core/`. Remains a valid **zero-token assisted mode**.

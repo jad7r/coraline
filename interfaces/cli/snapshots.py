@@ -142,8 +142,10 @@ def report(incident: Optional[str] = typer.Argument(None),
     """Render live checkpoint attestation, including for sealed incidents."""
     try:
         store = _store(incident, home, verify_key)
-        result = store.ws.snapshot_report(verify_key=store.key)
-        valid = store.health()["valid"]
+        result = store.ws.snapshot_report(verify_key=store.key) + "\n" + store.ws.anchor_report(
+            snapshot_verify_key=store.key)
+        valid = store.health()["valid"] and store.ws.anchor_health(
+            snapshot_verify_key=store.key)["valid"]
     except Exception:
         _failure()
     typer.echo(result)

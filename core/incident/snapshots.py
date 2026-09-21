@@ -448,7 +448,7 @@ class SnapshotStore:
                     count = previous["payload"]["audit_length"]
                     if len(audit) < count or audit[count - 1].entry_hash() != previous["payload"]["audit_head_hash"]:
                         raise SnapshotError("current audit contradicts the latest checkpoint")
-                if not self.ws.verify(include_snapshots=False)["ok"]:
+                if not self.ws.verify(include_snapshots=False, include_anchors=False)["ok"]:
                     raise SnapshotError("incident integrity verification failed")
                 captured = inventory(self.ws)
                 payload = {"domain": DOMAIN, "schema_version": 1, "incident_id": self.ws.incident_id,
