@@ -1,5 +1,19 @@
 # Independent snapshot anchor checkpoint — 2026-09-20
 
+## Tracking metadata
+
+- Feature commit: `983f9c2 feat: add independent snapshot anchors`
+- Starting checkpoint: `62e56da feat: add authenticated incident snapshots`
+- Final verification: **661 passed, 1 skipped, 28 warnings, 6 subtests passed**
+- Focused incident/CLI verification: **289 passed**
+- Focused snapshot/anchor verification: **155 passed**
+- Scope: **13 files changed, 1,840 insertions, 17 deletions**
+- Repository state after feature commit: clean working tree
+- Branch state after feature commit: `main` ahead of `origin/main` by four commits
+- Remote state: not pushed
+- Recommended next milestone: production-grade remote/WORM anchor adapter with
+  explicit capability declarations and independently protected registry distribution
+
 Implemented from clean `62e56da`. The repository's existing Snapshot v1 format,
 canonicalization, signing, state inventory, chain, current comparison, sealing,
 locking, CLI, reporting, tests, specification, and benchmark were inspected before
