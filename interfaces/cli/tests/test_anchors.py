@@ -138,3 +138,21 @@ def test_init_refuses_storage_and_private_key_under_home(anchor_cli):
                  "--private-key", str(ws.home / "secret"), "--registry", str(ws.home / "other.json"))
     assert result.exit_code == 1
     assert not (ws.home / "secret").exists()
+
+
+def test_init_gcs_writes_pinned_provider_config_without_cloud_access(tmp_path):
+    home = tmp_path / "home"
+    IncidentWorkspace.declare(home, title="GCS config", severity="SEV2", actor="tester")
+    key = tmp_path / "gcs-anchor.key"
+    result = CliRunner().invoke(
+        app,
+        ["anchor", "init-gcs", "--anchor-id", "gcs-vault", "--bucket", "coreline-anchor",
+         "--prefix", "org/coreline", "--private-key", str(key), "--policy", "REQUIRED"],
+        env={"CORELINE_HOME": str(home), "CORELINE_ACTOR": "tester"},
+    )
+    assert result.exit_code == 0, result.output
+    config = load_registry(registry_path(home))
+    entry = config["anchors"]["gcs-vault"]
+    assert entry["anchor_type"] == "gcs-v1"
+    assert entry["bucket"] == "coreline-anchor" and entry["prefix"] == "org/coreline"
+    assert entry["policy"] == "REQUIRED" and key.exists()

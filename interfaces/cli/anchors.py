@@ -10,7 +10,7 @@ from core.evidence.integrity import signing
 from core.incident import IncidentWorkspace
 from core.incident.anchors import (
     AnchorError, AnchorManager, _publish, canonical_bytes, load_registry,
-    registry_path, write_registry,
+    registry_path, write_gcs_registry, write_registry,
 )
 from core.incident.snapshots import load_private_key, load_public_key
 
@@ -50,6 +50,29 @@ def init(anchor_id: str = typer.Option(..., "--anchor-id"),
     except Exception:
         _fail()
     typer.echo(f"ANCHOR CONFIGURED {anchor_id}")
+
+
+@app.command("init-gcs")
+def init_gcs(anchor_id: str = typer.Option(..., "--anchor-id"),
+             bucket: str = typer.Option(..., "--bucket"),
+             prefix: str = typer.Option("coreline/anchors", "--prefix"),
+             private_key: str = typer.Option(..., "--private-key", help="New anchor private key outside the Coreline home."),
+             policy: str = typer.Option("OPTIONAL", "--policy"),
+             registry: Optional[str] = typer.Option(None, "--registry"),
+             home: Optional[str] = typer.Option(None, "--home")):
+    """Configure a GCS receipt ledger using ambient ADC/WIF credentials."""
+    try:
+        home_path = IncidentWorkspace.resolve_home(home)
+        private_path = Path(private_key).resolve()
+        if private_path.is_relative_to(home_path):
+            raise AnchorError("anchor private key must be outside Coreline home")
+        key, public = signing.generate_signing_keypair()
+        _publish(private_path, base64.b64encode(signing.encode_signing_key(key)))
+        write_gcs_registry(registry or registry_path(home_path), anchor_id, bucket,
+                           prefix, public, policy.upper())
+    except Exception:
+        _fail()
+    typer.echo(f"GCS ANCHOR CONFIGURED {anchor_id}")
 
 
 @app.command("snapshot")

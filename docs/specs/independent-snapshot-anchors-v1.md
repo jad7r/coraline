@@ -46,12 +46,13 @@ The CLI and reports call core APIs and contain no independent verification rules
 The filesystem reference can be placed outside the Coreline home and works offline,
 but another path on one host is not necessarily an independent security domain.
 Deployments must enforce separation with permissions, host boundaries, protected
-storage, or a future remote/WORM adapter appropriate to their threat model.
+storage, or the GCS adapter with independently governed retention controls.
 
 ## Provider contract and request
 
 `SnapshotAnchor` is the minimal provider protocol: `anchor(request)`,
-`get_expected_tip(incident_id)`, and `verify_ledger(incident_id)`. The reference
+`get_expected_tip(incident_id)`, `verify_ledger(incident_id)`, and explicit
+`capabilities()`. The reference
 `FilesystemAnchor` is an adapter. Core semantics do not depend on cloud, HTTP,
 databases, Redis, or vendor APIs.
 
@@ -106,7 +107,8 @@ predecessors, receipt identity, and receipt predecessor prevent field movement.
 
 Receipts contain no verification key. Trust comes from `<home>/trust/anchors.json`
 or `CORELINE_ANCHOR_REGISTRY`. The v1 registry defines a default enabled anchor,
-filesystem root, Ed25519 public key/fingerprint, provider type, and policy. An
+provider location (filesystem root or GCS bucket/prefix), Ed25519 public
+key/fingerprint, provider type, and policy. An
 explicit CLI registry overrides the environment/default. Private anchor keys and
 provider credentials are never stored in incidents or reports. The registry is a
 local pin; protect or distribute it independently for independent trust.
@@ -244,9 +246,11 @@ full ledger in 0.063 s. These figures are illustrative, not an SLA. The script m
 creation, standalone authentication, expected-tip lookup, and full O(n) ledger
 verification separately from snapshot creation.
 
-Future adapters can retain the same request/receipt semantics with S3/GCS/Azure
+Additional adapters can retain the same request/receipt semantics with S3/Azure
 retention controls, an organizational evidence vault, transparency service,
 timestamp service, or enterprise signing service. Their capabilities differ:
 retention, independent time, public auditability, and organizational identity must
-be declared and evaluated separately. V1 implements no network/cloud provider and
-does not pretend these systems offer equivalent guarantees.
+be declared and evaluated separately. The `gcs-v1` adapter uses the same semantics
+and explicitly reports that Coreline does not verify its externally managed
+retention policy; see `gcs-snapshot-anchor-v1.md`. Coreline does not pretend these
+systems offer equivalent guarantees.

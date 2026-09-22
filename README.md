@@ -339,6 +339,22 @@ The filesystem adapter should reside outside the Coreline home, but a different 
 on one host may not constitute an independent security domain. See the
 [independent anchor specification](docs/specs/independent-snapshot-anchors-v1.md).
 
+For a remote receipt ledger, Coreline also provides a GCS adapter:
+
+```bash
+python -m interfaces.cli.coreline anchor init-gcs --anchor-id vault-gcs \
+  --bucket org-coreline-anchors --prefix production/coreline \
+  --private-key /secure/anchor.key --policy REQUIRED
+```
+
+The adapter uses ambient ADC/Workload Identity and accepts no credential-file
+option. It stores one create-only object per receipt sequence and reads the full
+ledger to determine the expected tip; there is no mutable head object. Configure
+bucket retention, retention lock, IAM, audit logging, and an independently protected
+copy of `trust/anchors.json` outside Coreline. Coreline reports these retention
+controls as externally managed and does not claim to verify them. See the
+[GCS anchor deployment specification](docs/specs/gcs-snapshot-anchor-v1.md).
+
 ## Verification
 
 Baseline test gate:

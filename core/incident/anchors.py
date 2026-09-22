@@ -27,6 +27,7 @@ PREFIX = (DOMAIN + "\0").encode()
 RECEIPT_ID_RE = re.compile(r"ANC-[0-9a-f]{64}\Z")
 ANCHOR_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}\Z")
 POLICIES = {"OPTIONAL", "REQUIRED", "REQUIRED_FOR_SEAL"}
+PROVIDER_TYPES = {"filesystem-v1", "gcs-v1"}
 REQUEST_FIELDS = {
     "schema_version", "incident_id", "snapshot_id", "snapshot_digest",
     "state_digest", "snapshot_signer_key_id", "snapshot_sequence",
@@ -52,6 +53,17 @@ class SnapshotAnchor(Protocol):
     def anchor(self, request, acknowledged_at=None): ...
     def get_expected_tip(self, incident_id): ...
     def verify_ledger(self, incident_id): ...
+
+    def capabilities(self): ...
+
+
+def anchor_capabilities(anchor_type):
+    if anchor_type not in PROVIDER_TYPES:
+        raise AnchorError("unsupported trusted anchor provider")
+    return {"provider": anchor_type, "conditional_create": True,
+            "durable_read": True, "durable_list": True,
+            "retention_managed_externally": True, "retention_verified": False,
+            "independently_trusted_time": False}
 
 
 def _hash(data):
@@ -108,7 +120,8 @@ def _validate_request(request):
     canonical_bytes(request)
 
 
-def verify_receipt(receipt, verify_key, *, anchor_id=None, incident_id=None):
+def verify_receipt(receipt, verify_key, *, anchor_id=None, incident_id=None,
+                   anchor_type="filesystem-v1"):
     result = {"receipt_structurally_valid": False, "anchor_trusted": False,
               "receipt_authentic": False, "errors": []}
     try:
@@ -120,7 +133,7 @@ def verify_receipt(receipt, verify_key, *, anchor_id=None, incident_id=None):
         request = {field: p[field] for field in REQUEST_FIELDS}
         _validate_request(request)
         if (p["domain"] != DOMAIN or p["receipt_schema_version"] != 1 or
-                p["anchor_type"] != "filesystem-v1" or p["authentication_algorithm"] != "ed25519"):
+                p["anchor_type"] != anchor_type or p["authentication_algorithm"] != "ed25519"):
             raise ValueError()
         if not ANCHOR_ID_RE.fullmatch(p["anchor_id"]):
             raise ValueError()
@@ -174,15 +187,23 @@ def load_registry(path, *, incident_dir=None):
             raise ValueError()
         anchors = {}
         for item in data["anchors"]:
-            if set(item) != {"anchor_id", "anchor_type", "root", "verify_key", "fingerprint", "policy", "enabled"}:
+            common = {"anchor_id", "anchor_type", "verify_key", "fingerprint", "policy", "enabled"}
+            provider_fields = ({"root"} if item.get("anchor_type") == "filesystem-v1"
+                               else {"bucket", "prefix"} if item.get("anchor_type") == "gcs-v1"
+                               else None)
+            if provider_fields is None or set(item) != common | provider_fields:
                 raise ValueError()
-            if (not ANCHOR_ID_RE.fullmatch(item["anchor_id"]) or item["anchor_type"] != "filesystem-v1" or
+            if (not ANCHOR_ID_RE.fullmatch(item["anchor_id"]) or
                     item["policy"] not in POLICIES or type(item["enabled"]) is not bool or
                     item["anchor_id"] in anchors):
                 raise ValueError()
             key = signing.decode_verify_key(item["verify_key"])
-            if incident_dir is not None and Path(item["root"]).resolve().is_relative_to(Path(incident_dir).resolve()):
+            if (item["anchor_type"] == "filesystem-v1" and incident_dir is not None and
+                    Path(item["root"]).resolve().is_relative_to(Path(incident_dir).resolve())):
                 raise ValueError()
+            if item["anchor_type"] == "gcs-v1":
+                from .gcs_anchor import validate_gcs_location
+                validate_gcs_location(item["bucket"], item["prefix"])
             if item["fingerprint"] != signing.key_fingerprint(key):
                 raise ValueError()
             anchors[item["anchor_id"]] = {**item, "key": key}
@@ -207,6 +228,23 @@ def write_registry(path, anchor_id, root, verify_key, policy="OPTIONAL"):
         raise AnchorError("trusted anchor registry could not be created") from None
 
 
+def write_gcs_registry(path, anchor_id, bucket, prefix, verify_key, policy="OPTIONAL"):
+    """Create a pinned GCS anchor configuration without provider credentials."""
+    from .gcs_anchor import validate_gcs_location
+    if not ANCHOR_ID_RE.fullmatch(anchor_id) or policy not in POLICIES:
+        raise AnchorError("invalid trusted anchor configuration")
+    validate_gcs_location(bucket, prefix)
+    payload = {"schema_version": 1, "default_anchor": anchor_id, "anchors": [{
+        "anchor_id": anchor_id, "anchor_type": "gcs-v1", "bucket": bucket,
+        "prefix": prefix, "verify_key": signing.encode_verify_key(verify_key),
+        "fingerprint": signing.key_fingerprint(verify_key), "policy": policy, "enabled": True,
+    }]}
+    try:
+        _publish(Path(path), canonical_bytes(payload), 0o600)
+    except Exception:
+        raise AnchorError("trusted anchor registry could not be created") from None
+
+
 class FilesystemAnchor:
     """Append-only signed receipt ledger in a separately configured directory."""
     def __init__(self, root, anchor_id, verify_key, signing_key=None):
@@ -214,6 +252,9 @@ class FilesystemAnchor:
             raise AnchorError("invalid anchor identity")
         self.root, self.anchor_id = Path(root), anchor_id
         self.verify_key, self.signing_key = verify_key, signing_key
+
+    def capabilities(self):
+        return anchor_capabilities("filesystem-v1")
 
     def _incident_dir(self, incident_id):
         return self.root / "ledger" / hashlib.sha256(incident_id.encode()).hexdigest()
@@ -264,7 +305,8 @@ class FilesystemAnchor:
             receipts = []
             for path in self._paths(incident_id):
                 item = self.read(path.stem, incident_id)
-                check = verify_receipt(item, self.verify_key, anchor_id=self.anchor_id, incident_id=incident_id)
+                check = verify_receipt(item, self.verify_key, anchor_id=self.anchor_id,
+                                       incident_id=incident_id, anchor_type="filesystem-v1")
                 if not check["valid"] or item["payload"]["receipt_id"] != path.stem:
                     raise AnchorError("invalid receipt")
                 receipts.append(item)
@@ -329,7 +371,8 @@ class FilesystemAnchor:
                 receipt = {"payload": payload, "signature": base64.b64encode(
                     signing.sign(PREFIX + canonical_bytes(payload), self.signing_key)).decode("ascii")}
                 if not verify_receipt(receipt, self.verify_key, anchor_id=self.anchor_id,
-                                      incident_id=request["incident_id"])["valid"]:
+                                      incident_id=request["incident_id"],
+                                      anchor_type="filesystem-v1")["valid"]:
                     raise AnchorError("new anchor receipt verification failed")
                 encoded = canonical_bytes(receipt)
                 if len(encoded) > MAX_BYTES:
@@ -367,7 +410,14 @@ class AnchorManager:
     def provider(self, signing_key=None):
         if not self.entry:
             raise AnchorError("trusted anchor registry unavailable")
-        return FilesystemAnchor(self.entry["root"], self.entry["anchor_id"], self.entry["key"], signing_key)
+        if self.entry["anchor_type"] == "filesystem-v1":
+            return FilesystemAnchor(self.entry["root"], self.entry["anchor_id"],
+                                    self.entry["key"], signing_key)
+        if self.entry["anchor_type"] == "gcs-v1":
+            from .gcs_anchor import GCSAnchor
+            return GCSAnchor.keyless(self.entry["bucket"], self.entry["prefix"],
+                                     self.entry["anchor_id"], self.entry["key"], signing_key)
+        raise AnchorError("unsupported trusted anchor provider")
 
     def _cached(self):
         if not self.entry:
@@ -427,7 +477,8 @@ class AnchorManager:
         try:
             receipt = self.get_receipt(receipt_identifier)
             return verify_receipt(receipt, self.entry["key"], anchor_id=self.entry["anchor_id"],
-                                  incident_id=self.ws.incident_id)
+                                  incident_id=self.ws.incident_id,
+                                  anchor_type=self.entry["anchor_type"])
         except AnchorError:
             return {"valid": False, "receipt_structurally_valid": False,
                     "anchor_trusted": False, "receipt_authentic": False,
@@ -441,8 +492,12 @@ class AnchorManager:
 
     def health(self):
         policy = self.entry["policy"] if self.entry else "OPTIONAL"
+        capabilities = None
+        if self.entry:
+            capabilities = anchor_capabilities(self.entry["anchor_type"])
         result = {"valid": True, "status": "UNANCHORED", "policy": policy,
                   "anchor_id": self.entry["anchor_id"] if self.entry else None,
+                  "anchor_capabilities": capabilities,
                   "receipt_present": False, "receipt_structurally_valid": None,
                   "anchor_trusted": None, "receipt_authentic": None,
                   "receipt_matches_snapshot": None, "expected_tip_available": False,
@@ -460,7 +515,8 @@ class AnchorManager:
             latest_cached = cached[-1] if cached else None
             if latest_cached:
                 check = verify_receipt(latest_cached, self.entry["key"], anchor_id=self.entry["anchor_id"],
-                                       incident_id=self.ws.incident_id)
+                                       incident_id=self.ws.incident_id,
+                                       anchor_type=self.entry["anchor_type"])
                 result.update(receipt_present=True, receipt_structurally_valid=check["receipt_structurally_valid"],
                               anchor_trusted=check["anchor_trusted"], receipt_authentic=check["receipt_authentic"],
                               receipt_id=latest_cached["payload"].get("receipt_id"),
@@ -470,7 +526,9 @@ class AnchorManager:
                 # Every cached item must be authentic and monotonic; deletion is exposed online.
                 previous = None
                 for index, item in enumerate(cached, 1):
-                    check = verify_receipt(item, self.entry["key"], anchor_id=self.entry["anchor_id"], incident_id=self.ws.incident_id)
+                    check = verify_receipt(item, self.entry["key"], anchor_id=self.entry["anchor_id"],
+                                           incident_id=self.ws.incident_id,
+                                           anchor_type=self.entry["anchor_type"])
                     p = item["payload"]
                     if (not check["valid"] or p["anchor_sequence"] != index or
                             p["snapshot_sequence"] != index or
@@ -502,7 +560,8 @@ class AnchorManager:
             if reference:
                 reference_check = verify_receipt(reference, self.entry["key"],
                                                  anchor_id=self.entry["anchor_id"],
-                                                 incident_id=self.ws.incident_id)
+                                                 incident_id=self.ws.incident_id,
+                                                 anchor_type=self.entry["anchor_type"])
                 if not reference_check["valid"]:
                     raise AnchorError("expected anchor receipt invalid")
                 result.update(receipt_present=True,
@@ -571,6 +630,8 @@ class AnchorManager:
 def report_section(health):
     lines = ["## Independent checkpoint anchor", "", f"- Policy: {health['policy']}",
              f"- Anchor status: {health['status']}", f"- Anchor ID: {health.get('anchor_id')}",
+             f"- Anchor provider: {(health.get('anchor_capabilities') or {}).get('provider')}",
+             f"- Retention verified by Coreline: {(health.get('anchor_capabilities') or {}).get('retention_verified')}",
              f"- Receipt ID: {health.get('receipt_id')}",
              f"- Anchored snapshot: {health.get('anchored_snapshot_id')}",
              f"- Receipt authentic: {health.get('receipt_authentic')}",
