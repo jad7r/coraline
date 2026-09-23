@@ -35,20 +35,22 @@ def validate_gcs_location(bucket, prefix):
 class GCSAnchor:
     """Append-only receipt ledger using create-only GCS sequence objects."""
 
-    def __init__(self, bucket, prefix, anchor_id, verify_key, signing_key=None, *, client):
+    def __init__(self, bucket, prefix, anchor_id, verify_key, signing_key=None, *, client,
+                 key_resolver=None):
         from .anchors import ANCHOR_ID_RE
         validate_gcs_location(bucket, prefix)
         if not ANCHOR_ID_RE.fullmatch(anchor_id):
             raise AnchorError("invalid anchor identity")
         self.bucket, self.prefix, self.anchor_id = bucket, prefix, anchor_id
         self.verify_key, self.signing_key, self._client = verify_key, signing_key, client
+        self.key_resolver = key_resolver
 
     @classmethod
-    def keyless(cls, bucket, prefix, anchor_id, verify_key, signing_key=None):
+    def keyless(cls, bucket, prefix, anchor_id, verify_key, signing_key=None, *, key_resolver=None):
         """Construct with ambient ADC/WIF. No credential or key-file argument exists."""
         from google.cloud import storage
         return cls(bucket, prefix, anchor_id, verify_key, signing_key,
-                   client=storage.Client())
+                   client=storage.Client(), key_resolver=key_resolver)
 
     def capabilities(self):
         return anchor_capabilities("gcs-v1")
@@ -98,8 +100,15 @@ class GCSAnchor:
                 if name != self._name(incident_id, index):
                     raise AnchorError("non-monotonic GCS anchor ledger")
                 item = self._read_blob(name)
-                check = verify_receipt(item, self.verify_key, anchor_id=self.anchor_id,
+                key = self.verify_key
+                trusted = True
+                if self.key_resolver:
+                    resolved = self.key_resolver(item.get("payload", {}).get("anchor_key_id"))
+                    key, trusted = resolved.get("key"), resolved.get("trusted", False)
+                check = verify_receipt(item, key, anchor_id=self.anchor_id,
                                        incident_id=incident_id, anchor_type="gcs-v1")
+                if not trusted:
+                    check["valid"] = False
                 p = item.get("payload", {})
                 if (not check["valid"] or p.get("anchor_sequence") != index or
                         p.get("snapshot_sequence") != index):

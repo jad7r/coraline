@@ -308,6 +308,35 @@ class SnapshotStore:
                 self.key = load_public_key(pin, incident_dir=workspace.dir)
             except SnapshotError:
                 pass
+        self.trust = None
+        try:
+            from .trust_registry import TrustRegistryStore
+            self.trust = TrustRegistryStore.discover(workspace.home, incident_dir=workspace.dir)
+        except Exception:
+            # A present but malformed registry is handled fail-closed by _check_document/create.
+            from .trust_registry import root_path
+            if root_path(workspace.home).exists():
+                self.trust = False
+
+    def _check_document(self, document, *, expected_id=None):
+        if self.trust is False:
+            return {"valid": False, "structure_valid": False, "signer_trusted": False,
+                    "signature_valid": False, "signer_status": "REGISTRY_INVALID",
+                    "errors": ["TRUST REGISTRY INVALID"]}
+        if self.trust:
+            key_id = document.get("payload", {}).get("signing_key_id")
+            qualified = self.trust.classify_key(key_id, "SNAPSHOT_SIGNER", "default")
+            check = verify_document(document, qualified["key"], incident_id=self.ws.incident_id,
+                                    expected_id=expected_id)
+            check["signer_status"] = qualified["classification"]
+            if not qualified["trusted"]:
+                check["valid"] = False
+                check["errors"].append(qualified["classification"])
+            return check
+        check = verify_document(document, self.key, incident_id=self.ws.incident_id,
+                                expected_id=expected_id)
+        check["signer_status"] = "LEGACY_PIN" if check["signer_trusted"] else "UNKNOWN_KEY"
+        return check
 
     def _paths(self):
         _no_symlinks(self.directory)
@@ -332,7 +361,7 @@ class SnapshotStore:
 
     def verify_snapshot(self, identifier):
         try:
-            return verify_document(self.read(identifier), self.key, incident_id=self.ws.incident_id, expected_id=identifier)
+            return self._check_document(self.read(identifier), expected_id=identifier)
         except Exception:
             return {"valid": False, "structure_valid": False, "signer_trusted": False,
                     "signature_valid": False, "errors": ["SNAPSHOT MISSING OR MALFORMED"]}
@@ -345,7 +374,7 @@ class SnapshotStore:
             documents = []
             for path in self._paths():
                 document = self.read(path.stem)
-                check = verify_document(document, self.key, incident_id=self.ws.incident_id, expected_id=path.stem)
+                check = self._check_document(document, expected_id=path.stem)
                 if not check["valid"]:
                     result["errors"].extend(check["errors"])
                     return result
@@ -372,7 +401,7 @@ class SnapshotStore:
     def compare_current(self, identifier):
         try:
             document = self.read(identifier)
-            check = verify_document(document, self.key, incident_id=self.ws.incident_id, expected_id=identifier)
+            check = self._check_document(document, expected_id=identifier)
         except Exception:
             document = None
             check = {"valid": False, "structure_valid": False, "signer_trusted": False,
@@ -403,10 +432,13 @@ class SnapshotStore:
         latest = chain["latest"]
         if latest:
             p = latest["payload"]
+            latest_check = self._check_document(latest, expected_id=p["snapshot_id"])
             comparison = self.compare_current(p["snapshot_id"])
             result.update(latest_id=p["snapshot_id"], created_at=p["created_at"],
                           state_digest=p["incident_state_digest"], signing_key_id=p["signing_key_id"],
-                          signature_valid=True, final=p["final"], current_state_matches=comparison["current_state_matches"])
+                          signature_valid=latest_check["signature_valid"],
+                          signer_status=latest_check.get("signer_status"), final=p["final"],
+                          current_state_matches=comparison["current_state_matches"])
             if not comparison["current_state_matches"]:
                 result["status"] = "CURRENT_STATE_DIFFERS"
             try:
@@ -435,7 +467,17 @@ class SnapshotStore:
                 self.ws.state = fresh.state
                 if not actor or not actor.strip():
                     raise SnapshotError("checkpoint actor required")
-                if self.key is None or signing.key_fingerprint(signing_key.verify_key) != signing.key_fingerprint(self.key):
+                signing_verify_key = self.key
+                if self.trust is False:
+                    raise SnapshotError("signed trust registry invalid")
+                if self.trust:
+                    try:
+                        self.trust.authorize(signing_key, "SNAPSHOT_SIGNER", "default")
+                        signing_verify_key = signing_key.verify_key
+                    except Exception:
+                        raise SnapshotError("snapshot signing key is not active in signed registry") from None
+                elif (self.key is None or signing.key_fingerprint(signing_key.verify_key) !=
+                      signing.key_fingerprint(self.key)):
                     raise SnapshotError("snapshot signing key does not match public pin")
                 chain = self.verify_chain()
                 if not chain["valid"]:
@@ -455,11 +497,11 @@ class SnapshotStore:
                            "sequence": chain["count"] + 1, "created_at": to_iso(when or datetime.now(timezone.utc)),
                            "created_by": actor, "previous_snapshot_id": previous["payload"]["snapshot_id"] if previous else None,
                            "previous_snapshot_digest": snapshot_digest(previous) if previous else None,
-                           **captured, "signing_key_id": signing.key_fingerprint(self.key),
+                           **captured, "signing_key_id": signing.key_fingerprint(signing_verify_key),
                            "signature_algorithm": "ed25519", "final": self.ws.is_sealed}
                 payload["snapshot_id"] = snapshot_id(payload)
                 envelope = {"payload": payload, "signature": base64.b64encode(signing.sign(PREFIX + canonical_bytes(payload), signing_key)).decode("ascii")}
-                if not verify_document(envelope, self.key, incident_id=self.ws.incident_id)["valid"]:
+                if not verify_document(envelope, signing_verify_key, incident_id=self.ws.incident_id)["valid"]:
                     raise SnapshotError("new snapshot verification failed")
                 if inventory(self.ws) != captured:
                     raise SnapshotError("incident changed during checkpoint creation")
@@ -478,6 +520,7 @@ def report_section(health):
     lines = ["## Integrity checkpoint", "", f"- Snapshot status: {health['status']}"]
     for field, label in (("latest_id", "Snapshot ID"), ("created_at", "Checkpoint time"),
                          ("state_digest", "State digest"), ("signing_key_id", "Signer key"),
+                         ("signer_status", "Signer trust status"),
                          ("signature_valid", "Signature valid"), ("chain_valid", "Chain valid"),
                          ("final", "Final sealed checkpoint"),
                          ("current_state_matches", "Current state matches")):

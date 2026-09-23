@@ -247,11 +247,26 @@ def write_gcs_registry(path, anchor_id, bucket, prefix, verify_key, policy="OPTI
 
 class FilesystemAnchor:
     """Append-only signed receipt ledger in a separately configured directory."""
-    def __init__(self, root, anchor_id, verify_key, signing_key=None):
+    def __init__(self, root, anchor_id, verify_key, signing_key=None, key_resolver=None):
         if not ANCHOR_ID_RE.fullmatch(anchor_id):
             raise AnchorError("invalid anchor identity")
         self.root, self.anchor_id = Path(root), anchor_id
         self.verify_key, self.signing_key = verify_key, signing_key
+        self.key_resolver = key_resolver
+
+    def _verify(self, item, incident_id):
+        key = self.verify_key
+        trusted = True
+        if self.key_resolver:
+            resolved = self.key_resolver(item.get("payload", {}).get("anchor_key_id"))
+            key, trusted = resolved.get("key"), resolved.get("trusted", False)
+        result = verify_receipt(item, key, anchor_id=self.anchor_id,
+                                incident_id=incident_id, anchor_type="filesystem-v1")
+        result["signer_status"] = (resolved.get("classification") if self.key_resolver else
+                                   "LEGACY_PIN")
+        if not trusted:
+            result["valid"] = False
+        return result
 
     def capabilities(self):
         return anchor_capabilities("filesystem-v1")
@@ -305,8 +320,7 @@ class FilesystemAnchor:
             receipts = []
             for path in self._paths(incident_id):
                 item = self.read(path.stem, incident_id)
-                check = verify_receipt(item, self.verify_key, anchor_id=self.anchor_id,
-                                       incident_id=incident_id, anchor_type="filesystem-v1")
+                check = self._verify(item, incident_id)
                 if not check["valid"] or item["payload"]["receipt_id"] != path.stem:
                     raise AnchorError("invalid receipt")
                 receipts.append(item)
@@ -397,6 +411,14 @@ class AnchorManager:
             except AnchorError:
                 self.config_error = registry_path(workspace.home).exists() or (workspace.dir / "anchors").exists()
                 self.config = None
+        self.trust = None
+        try:
+            from .trust_registry import TrustRegistryStore
+            self.trust = TrustRegistryStore.discover(workspace.home, incident_dir=workspace.dir)
+        except Exception:
+            from .trust_registry import root_path
+            if root_path(workspace.home).exists():
+                self.trust = False
 
     @property
     def entry(self):
@@ -410,13 +432,27 @@ class AnchorManager:
     def provider(self, signing_key=None):
         if not self.entry:
             raise AnchorError("trusted anchor registry unavailable")
+        verify_key = self.entry["key"]
+        resolver = None
+        if self.trust is False:
+            raise AnchorError("signed trust registry invalid")
+        if self.trust:
+            try:
+                verify_key = self.trust.active_key("ANCHOR_SIGNER", self.entry["anchor_id"])
+                resolver = lambda key_id: self.trust.classify_key(
+                    key_id, "ANCHOR_SIGNER", self.entry["anchor_id"])
+                if signing_key is not None:
+                    self.trust.authorize(signing_key, "ANCHOR_SIGNER", self.entry["anchor_id"])
+            except Exception:
+                raise AnchorError("anchor key is not active in signed registry") from None
         if self.entry["anchor_type"] == "filesystem-v1":
             return FilesystemAnchor(self.entry["root"], self.entry["anchor_id"],
-                                    self.entry["key"], signing_key)
+                                    verify_key, signing_key, resolver)
         if self.entry["anchor_type"] == "gcs-v1":
             from .gcs_anchor import GCSAnchor
+            kwargs = {"key_resolver": resolver} if resolver else {}
             return GCSAnchor.keyless(self.entry["bucket"], self.entry["prefix"],
-                                     self.entry["anchor_id"], self.entry["key"], signing_key)
+                                     self.entry["anchor_id"], verify_key, signing_key, **kwargs)
         raise AnchorError("unsupported trusted anchor provider")
 
     def _cached(self):
@@ -436,6 +472,24 @@ class AnchorManager:
                 raise AnchorError("cached receipt identity mismatch")
             result.append(item)
         return sorted(result, key=lambda item: item["payload"].get("anchor_sequence", -1))
+
+    def _verify_cached_receipt(self, receipt):
+        key = self.entry["key"]
+        trusted = True
+        classification = "LEGACY_PIN"
+        if self.trust is False:
+            trusted, key, classification = False, None, "REGISTRY_INVALID"
+        elif self.trust:
+            resolved = self.trust.classify_key(receipt.get("payload", {}).get("anchor_key_id"),
+                                               "ANCHOR_SIGNER", self.entry["anchor_id"])
+            key, trusted, classification = resolved["key"], resolved["trusted"], resolved["classification"]
+        result = verify_receipt(receipt, key, anchor_id=self.entry["anchor_id"],
+                                incident_id=self.ws.incident_id,
+                                anchor_type=self.entry["anchor_type"])
+        result["signer_status"] = classification
+        if not trusted:
+            result["valid"] = False
+        return result
 
     def anchor_snapshot(self, snapshot_identifier, signing_key, acknowledged_at=None):
         store = SnapshotStore(self.ws, self.snapshot_key)
@@ -476,9 +530,7 @@ class AnchorManager:
                     "errors": ["TRUSTED ANCHOR UNAVAILABLE"]}
         try:
             receipt = self.get_receipt(receipt_identifier)
-            return verify_receipt(receipt, self.entry["key"], anchor_id=self.entry["anchor_id"],
-                                  incident_id=self.ws.incident_id,
-                                  anchor_type=self.entry["anchor_type"])
+            return self._verify_cached_receipt(receipt)
         except AnchorError:
             return {"valid": False, "receipt_structurally_valid": False,
                     "anchor_trusted": False, "receipt_authentic": False,
@@ -500,6 +552,7 @@ class AnchorManager:
                   "anchor_capabilities": capabilities,
                   "receipt_present": False, "receipt_structurally_valid": None,
                   "anchor_trusted": None, "receipt_authentic": None,
+                  "receipt_signer_status": None,
                   "receipt_matches_snapshot": None, "expected_tip_available": False,
                   "expected_tip_checked": False, "expected_tip_relation": "UNANCHORED",
                   "anchor_policy_satisfied": policy == "OPTIONAL", "receipt_id": None,
@@ -514,11 +567,10 @@ class AnchorManager:
                 return result
             latest_cached = cached[-1] if cached else None
             if latest_cached:
-                check = verify_receipt(latest_cached, self.entry["key"], anchor_id=self.entry["anchor_id"],
-                                       incident_id=self.ws.incident_id,
-                                       anchor_type=self.entry["anchor_type"])
+                check = self._verify_cached_receipt(latest_cached)
                 result.update(receipt_present=True, receipt_structurally_valid=check["receipt_structurally_valid"],
                               anchor_trusted=check["anchor_trusted"], receipt_authentic=check["receipt_authentic"],
+                              receipt_signer_status=check.get("signer_status"),
                               receipt_id=latest_cached["payload"].get("receipt_id"),
                               anchored_snapshot_id=latest_cached["payload"].get("snapshot_id"))
                 if not check["valid"]:
@@ -526,9 +578,7 @@ class AnchorManager:
                 # Every cached item must be authentic and monotonic; deletion is exposed online.
                 previous = None
                 for index, item in enumerate(cached, 1):
-                    check = verify_receipt(item, self.entry["key"], anchor_id=self.entry["anchor_id"],
-                                           incident_id=self.ws.incident_id,
-                                           anchor_type=self.entry["anchor_type"])
+                    check = self._verify_cached_receipt(item)
                     p = item["payload"]
                     if (not check["valid"] or p["anchor_sequence"] != index or
                             p["snapshot_sequence"] != index or
@@ -558,16 +608,14 @@ class AnchorManager:
                         expected["payload"]["receipt_id"] != latest_cached["payload"]["receipt_id"]):
                     raise AnchorError("external expected tip conflicts with cached receipt")
             if reference:
-                reference_check = verify_receipt(reference, self.entry["key"],
-                                                 anchor_id=self.entry["anchor_id"],
-                                                 incident_id=self.ws.incident_id,
-                                                 anchor_type=self.entry["anchor_type"])
+                reference_check = self._verify_cached_receipt(reference)
                 if not reference_check["valid"]:
                     raise AnchorError("expected anchor receipt invalid")
                 result.update(receipt_present=True,
                               receipt_structurally_valid=reference_check["receipt_structurally_valid"],
                               anchor_trusted=reference_check["anchor_trusted"],
                               receipt_authentic=reference_check["receipt_authentic"],
+                              receipt_signer_status=reference_check.get("signer_status"),
                               receipt_id=reference["payload"]["receipt_id"],
                               anchored_snapshot_id=reference["payload"]["snapshot_id"])
             chain = SnapshotStore(self.ws, self.snapshot_key).verify_chain()
@@ -635,6 +683,7 @@ def report_section(health):
              f"- Receipt ID: {health.get('receipt_id')}",
              f"- Anchored snapshot: {health.get('anchored_snapshot_id')}",
              f"- Receipt authentic: {health.get('receipt_authentic')}",
+             f"- Receipt signer status: {health.get('receipt_signer_status')}",
              f"- Expected tip checked: {health.get('expected_tip_checked')}",
              f"- Expected tip relation: {health.get('expected_tip_relation')}",
              f"- Policy satisfied: {health.get('anchor_policy_satisfied')}", ""]

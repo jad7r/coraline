@@ -64,6 +64,7 @@ from core.evidence.registry import (
 from core.evidence.seal import load_seal, write_seal
 from interfaces.cli.snapshots import app as snapshot_app
 from interfaces.cli.anchors import app as anchor_app
+from interfaces.cli.trust import app as trust_app
 from core.incident.anchors import AnchorError, load_registry as load_anchor_registry, registry_path as anchor_registry_path
 from core.incident.snapshots import SnapshotError, load_private_key, load_public_key
 
@@ -124,6 +125,7 @@ app.add_typer(decision_app, name="decision")
 app.add_typer(graph_app, name="graph")
 app.add_typer(snapshot_app, name="snapshot")
 app.add_typer(anchor_app, name="anchor")
+app.add_typer(trust_app, name="trust")
 
 
 # ---- shared helpers ---------------------------------------------------------- #
@@ -1716,6 +1718,7 @@ def doctor(home: Optional[str] = typer.Option(None, "--home")):
         table.add_row("audit chain", "intact" if v["audit_chain"] else "broken")
         table.add_row("storage artifacts", "verified" if v["storage_artifacts"] else "failed")
         table.add_row("snapshots", v["snapshot_health"]["status"])
+        table.add_row("trust registry", v["trust_registry_health"]["status"])
         table.add_row("anchor policy", v["anchor_health"]["policy"])
         table.add_row("anchor", v["anchor_health"]["status"])
         if not _verification_ok(v):
@@ -1836,6 +1839,7 @@ def _verification_panel(ws: IncidentWorkspace, v: dict, ok: bool) -> Panel:
         table.add_row(key.replace("_", " "), "verified" if v[key] else "failed")
     table.add_row("signer trust", v.get("signer_trust", "not checked (use --trusted)"))
     table.add_row("snapshots", v["snapshot_health"]["status"])
+    table.add_row("trust registry", v["trust_registry_health"]["status"])
     table.add_row("anchor policy", v["anchor_health"]["policy"])
     table.add_row("anchor", v["anchor_health"]["status"])
     if "trust_reason" in v:

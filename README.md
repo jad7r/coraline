@@ -355,6 +355,30 @@ copy of `trust/anchors.json` outside Coreline. Coreline reports these retention
 controls as externally managed and does not claim to verify them. See the
 [GCS anchor deployment specification](docs/specs/gcs-snapshot-anchor-v1.md).
 
+### Signed trust registry
+
+Signed registry releases authenticate key authorization and preserve rotation and
+revocation history. Existing workspaces remain on legacy public-key pins until an
+operator explicitly bootstraps a registry and imports the keys that should remain
+trusted.
+
+```bash
+python -m interfaces.cli.coreline trust init --registry-id org-main \
+  --private-key /secure/registry-root.key --actor security \
+  --expected-tip /independent/coreline-registry-tips
+python -m interfaces.cli.coreline trust key add \
+  --public-key ~/.coreline/trust/snapshot.verify.json \
+  --purpose SNAPSHOT_SIGNER --scope default --identity snapshot-current \
+  --root-key /secure/registry-root.key --actor security
+python -m interfaces.cli.coreline trust status --require-expected-tip
+```
+
+ACTIVE keys may sign new material. RETIRED keys verify historical material but
+cannot sign new snapshots or receipts. REVOKED keys remain recorded and their
+signatures are reported as cryptographically meaningful but untrusted. Protect the
+registry root pin and expected-tip history independently. See the
+[signed trust-registry specification](docs/specs/signed-trust-registry-v1.md).
+
 ## Verification
 
 Baseline test gate:

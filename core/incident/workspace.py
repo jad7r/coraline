@@ -1269,8 +1269,18 @@ class IncidentWorkspace:
             anchors.entry and anchors.entry["policy"] in {"REQUIRED", "REQUIRED_FOR_SEAL"})
         snapshot_required = bool(chain["count"] or snapshot_signing_key is not None or anchor_required_for_seal)
         if snapshot_required:
-            if (snapshot_signing_key is None or checkpoints.key is None or
-                    signing.key_fingerprint(snapshot_signing_key.verify_key) != signing.key_fingerprint(checkpoints.key)):
+            authorized = False
+            if snapshot_signing_key is not None and checkpoints.trust:
+                try:
+                    checkpoints.trust.authorize(snapshot_signing_key, "SNAPSHOT_SIGNER", "default")
+                    authorized = True
+                except Exception:
+                    pass
+            elif (snapshot_signing_key is not None and checkpoints.key is not None and
+                  signing.key_fingerprint(snapshot_signing_key.verify_key) ==
+                  signing.key_fingerprint(checkpoints.key)):
+                authorized = True
+            if not authorized:
                 raise WorkspaceError("snapshot-backed sealing requires a matching external signing key")
         if anchor_required_for_seal and anchor_signing_key is None:
             raise WorkspaceError("anchor-backed sealing requires an external anchor signing key")
@@ -4090,6 +4100,10 @@ class IncidentWorkspace:
             "manifest_signature", "custody_chain", "audit_chain", "storage_artifacts",
             "subjects", "observations", "claims", "actions", "decisions", "case_graph",
         ))
+        from .trust_registry import trust_health
+        result["trust_registry_health"] = trust_health(self.home, incident_dir=self.dir)
+        result["trust_registry"] = result["trust_registry_health"]["valid"]
+        result["ok"] = result["ok"] and result["trust_registry"]
         if include_snapshots:
             from .snapshots import SnapshotStore
             result["snapshot_health"] = SnapshotStore(self, snapshot_verify_key).health()
@@ -4152,6 +4166,10 @@ class IncidentWorkspace:
     def anchor_report(self, *, anchor_config=None, snapshot_verify_key=None, online=True):
         from .anchors import AnchorManager, report_section
         return report_section(AnchorManager(self, anchor_config, snapshot_verify_key, online).health())
+
+    def trust_registry_report(self):
+        from .trust_registry import report_section, trust_health
+        return report_section(trust_health(self.home, incident_dir=self.dir))
 
     def _verify_storage_artifacts(self, manifest: EvidenceManifest) -> Dict[str, Any]:
         missing: List[str] = []
@@ -4280,6 +4298,7 @@ class IncidentWorkspace:
         lines.append(f"- Chain of custody: **{'INTACT' if v['custody_chain'] else 'BROKEN'}**")
         lines.append(f"- Audit log: **{'TAMPER-EVIDENT / INTACT' if v['audit_chain'] else 'BROKEN'}**")
         lines.append("")
+        lines.append(self.trust_registry_report())
         lines.append(self.snapshot_report())
         lines.append(self.anchor_report())
         lines.append("## Evidence manifest")
