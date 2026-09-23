@@ -487,13 +487,18 @@ class TrustRegistryStore:
         releases = [self.read(path.stem) for path in self._paths()]
         releases.sort(key=lambda item: item["payload"]["generation"])
         return {"bundle_schema_version": 1, "registry_id": self.pin["registry_id"],
-                "root_key_id": self.pin["root_key_id"], "releases": releases}
+                "root_key_id": self.pin["root_key_id"],
+                "root_verify_key": signing.encode_verify_key(self.pin["key"]),
+                "releases": releases}
 
     def import_bundle(self, bundle):
         if (not isinstance(bundle, dict) or
-                set(bundle) != {"bundle_schema_version", "registry_id", "root_key_id", "releases"} or
+                set(bundle) != {"bundle_schema_version", "registry_id", "root_key_id",
+                                "root_verify_key", "releases"} or
                 bundle["bundle_schema_version"] != 1 or bundle["registry_id"] != self.pin["registry_id"] or
-                bundle["root_key_id"] != self.pin["root_key_id"] or not isinstance(bundle["releases"], list)):
+                bundle["root_key_id"] != self.pin["root_key_id"] or
+                bundle["root_verify_key"] != signing.encode_verify_key(self.pin["key"]) or
+                not isinstance(bundle["releases"], list)):
             raise TrustRegistryError("invalid registry bundle identity")
         documents = list(bundle["releases"])
         documents.sort(key=lambda item: item.get("payload", {}).get("generation", -1))

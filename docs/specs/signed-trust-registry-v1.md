@@ -171,8 +171,9 @@ tip for audit, then distribute the new pin through an independently governed pat
 
 ## Portable bundle and import
 
-An exported bundle contains registry identity, root key ID, and the complete signed
-release chain. It contains no private keys or credentials. Import verifies every
+An exported bundle contains registry identity, root key ID/public key, and the
+complete signed release chain. It contains no private keys or credentials. Import
+first requires the bundled root to match the independently pinned local root, then verifies every
 signature, identity, generation, transition, and predecessor against the already
 pinned local root before publication. It accepts an identical prefix plus newer
 successors. Older bundles and any conflict with local history are rejected. The

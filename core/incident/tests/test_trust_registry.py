@@ -229,11 +229,15 @@ def test_expected_tip_unavailable_is_distinct_and_required_fails(registry, monke
 def test_bundle_newer_import_and_rollback_conflict_rejected(registry, tmp_path):
     key, _ = signing.generate_signing_keypair(); add_key(registry, key)
     bundle = registry[1].export_bundle()
+    assert signing.decode_verify_key(bundle["root_verify_key"]) == registry[3]
     target = t.TrustRegistryStore(tmp_path / "imported", registry[1].pin)
     target.import_bundle(bundle)
     assert target.verify_chain()["count"] == 2
     with pytest.raises(t.TrustRegistryError): target.import_bundle({**bundle, "releases": bundle["releases"][:1]})
     attacker = copy.deepcopy(bundle); attacker["registry_id"] = "other"
+    with pytest.raises(t.TrustRegistryError): target.import_bundle(attacker)
+    _, attacker_public = signing.generate_signing_keypair()
+    attacker = copy.deepcopy(bundle); attacker["root_verify_key"] = signing.encode_verify_key(attacker_public)
     with pytest.raises(t.TrustRegistryError): target.import_bundle(attacker)
 
 
