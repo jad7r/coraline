@@ -378,6 +378,8 @@ cannot sign new snapshots or receipts. REVOKED keys remain recorded and their
 signatures are reported as cryptographically meaningful but untrusted. Protect the
 registry root pin and expected-tip history independently. See the
 [signed trust-registry specification](docs/specs/signed-trust-registry-v1.md).
+The next compatible format milestone is defined in the
+[trust-bound artifact v2 specification](docs/specs/trust-bound-artifacts-v2.md).
 
 ## Verification
 
