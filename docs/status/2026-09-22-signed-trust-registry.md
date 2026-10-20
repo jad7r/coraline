@@ -37,3 +37,11 @@ historical artifact is rewritten in this checkpoint.
   while a worker remains in `concurrent.futures.thread._worker`. No related code was
   changed and the test was deselected and reported rather than hidden. The other
   146 service tests are included in the successful complete practical gate.
+
+## Follow-up — 2026-10-19
+
+The provider-failure regression was isolated from the runner's thread-pool teardown:
+the test now executes the blocking boundary inline while retaining the real route,
+orchestrator, failing-provider, Redis, filesystem, integrity, and secret-redaction
+assertions. Production behavior is unchanged. The complete gate now passes without
+deselection: **710 passed, 1 skipped, 28 warnings, 6 subtests passed** in 48.39 seconds.

@@ -387,14 +387,17 @@ Baseline test gate:
 .venv/bin/python -m pytest core autonomous services lib interfaces/cli/tests interfaces/gui/tests -q
 ```
 
-Current authenticated-snapshot checkpoint:
+Current complete regression gate:
 
 ```text
-661 passed, 1 skipped, 28 warnings, 6 subtests passed
+710 passed, 1 skipped, 28 warnings, 6 subtests passed
 ```
 
-The incident/CLI regression selection passed 289 tests, including 89 snapshot and
-66 anchor scenarios. See the [anchor checkpoint assessment](docs/status/2026-09-20-independent-snapshot-anchors.md)
+The gate includes the signed trust-registry, snapshot, anchor, GCS, incident, CLI,
+GUI, service, autonomous, and shared-library suites. The previously stalled
+provider-failure regression now runs as part of the normal gate. See the
+[signed trust-registry checkpoint](docs/status/2026-09-22-signed-trust-registry.md),
+[anchor checkpoint assessment](docs/status/2026-09-20-independent-snapshot-anchors.md),
 and [snapshot checkpoint assessment](docs/status/2026-09-20-authenticated-snapshots.md).
 The earlier post-commit audit regression selection passed 127 tests. See the
 [architecture and security audit](docs/status/2026-09-19-post-commit-audit.md)

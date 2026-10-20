@@ -252,16 +252,25 @@ async def test_jira_real_startup_uses_shared_credentials(monkeypatch, credential
 @pytest.mark.asyncio
 async def test_provider_failure_does_not_write_or_leak(monkeypatch, credentials, tmp_path, capsys):
     from services.brain_service.handlers.pir_orchestrator import PIROrchestrator
+    from services.brain_service.handlers import pir_orchestrator
     from services.brain_service.models.incident_event import IncidentEvent
     from services.brain_service.routes.pir import generate_pir
     from core.incident.workspace import IncidentWorkspace
     import fakeredis.aioredis
-    from unittest.mock import Mock
     canary = 'CORELINE_TEST_SECRET_DO_NOT_LOG_7f3a91'
+
+    class FailingProvider:
+        def generate(self, *args, **kwargs):
+            raise RuntimeError(canary)
+
+    async def run_inline(function, *args, **kwargs):
+        return function(*args, **kwargs)
+
+    monkeypatch.setattr(pir_orchestrator.asyncio, 'to_thread', run_inline)
+
     ws = IncidentWorkspace.declare(tmp_path / 'incidents', title='Preserve', severity='SEV2', actor='tester')
     before = {p: p.read_bytes() for p in ws.home.rglob('*') if p.is_file()}
-    provider = Mock()
-    provider.generate.side_effect = RuntimeError(canary)
+    provider = FailingProvider()
     client = fakeredis.aioredis.FakeRedis(decode_responses=True)
     try:
         orchestrator = PIROrchestrator(client, tmp_path / 'drafts', pir_provider=provider)
