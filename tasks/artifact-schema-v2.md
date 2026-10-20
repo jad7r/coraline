@@ -6,10 +6,10 @@ Use red-first tests for each phase and keep v1 fixtures immutable.
 
 ## Phase 1 — registry release resolution
 
-- [ ] Resolve an exact authenticated release by generation, ID, digest, registry ID,
+- [x] Resolve an exact authenticated release by generation, ID, digest, registry ID,
   and root key ID.
-- [ ] Classify a key at that historical release separately from its current status.
-- [ ] Reject release data not authenticated through the pinned local chain.
+- [x] Classify a key at that historical release separately from its current status.
+- [x] Reject release data not authenticated through the pinned local chain.
 
 ## Phase 2 — snapshot v2
 

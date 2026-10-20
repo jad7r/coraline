@@ -17,7 +17,7 @@ from pathlib import Path
 
 from core.evidence._util import to_iso
 from core.evidence.integrity import signing
-from .snapshots import MAX_BYTES, _no_symlinks, _publish, _read, canonical_bytes, parse_json
+from .snapshots import HASH_RE, MAX_BYTES, _no_symlinks, _publish, _read, canonical_bytes, parse_json
 
 DOMAIN = "coreline.trust-registry-release.v1"
 TIP_DOMAIN = "coreline.trust-registry-expected-tip.v1"
@@ -32,6 +32,7 @@ RELEASE_FIELDS = {"domain", "schema_version", "registry_id", "generation", "rele
                   "transition", "keys", "root_key_id", "signature_algorithm"}
 KEY_FIELDS = {"key_id", "purpose", "scope", "identity", "verify_key", "status",
               "introduced_generation", "status_generation", "reason"}
+BINDING_FIELDS = {"registry_id", "generation", "release_id", "release_digest", "root_key_id"}
 _THREAD_LOCKS = {}
 _THREAD_LOCKS_GUARD = threading.Lock()
 
@@ -440,6 +441,63 @@ class TrustRegistryStore:
         if not chain["valid"] or chain["latest"] is None:
             raise TrustRegistryError("trusted registry unavailable")
         return chain["latest"]["payload"]["keys"]
+
+    def binding_for_release(self, release):
+        """Return the closed artifact binding for an authenticated local release."""
+        try:
+            payload = release["payload"]
+            binding = {
+                "registry_id": payload["registry_id"],
+                "generation": payload["generation"],
+                "release_id": payload["release_id"],
+                "release_digest": release_digest(release),
+                "root_key_id": payload["root_key_id"],
+            }
+            if self.resolve_binding(binding) != release:
+                raise TrustRegistryError("registry release binding mismatch")
+            return binding
+        except TrustRegistryError:
+            raise
+        except Exception:
+            raise TrustRegistryError("registry release binding mismatch") from None
+
+    def resolve_binding(self, binding):
+        """Resolve an artifact binding only through the pinned, verified chain."""
+        try:
+            if (not isinstance(binding, dict) or set(binding) != BINDING_FIELDS or
+                    binding["registry_id"] != self.pin["registry_id"] or
+                    binding["root_key_id"] != self.pin["root_key_id"] or
+                    type(binding["generation"]) is not int or binding["generation"] < 1 or
+                    not RELEASE_ID_RE.fullmatch(binding["release_id"]) or
+                    not HASH_RE.fullmatch(binding["release_digest"])):
+                raise ValueError()
+            chain = self.verify_chain()
+            if not chain["valid"] or binding["generation"] > chain["count"]:
+                raise ValueError()
+            release = self.read(binding["release_id"])
+            payload = release["payload"]
+            if (payload["generation"] != binding["generation"] or
+                    payload["registry_id"] != binding["registry_id"] or
+                    payload["root_key_id"] != binding["root_key_id"] or
+                    release_digest(release) != binding["release_digest"]):
+                raise ValueError()
+            return release
+        except Exception:
+            raise TrustRegistryError("registry release binding mismatch") from None
+
+    def classify_key_at(self, binding, key_id, purpose, scope):
+        """Classify a key in the exact authenticated release named by a binding."""
+        release = self.resolve_binding(binding)
+        item = next((record for record in release["payload"]["keys"]
+                     if record["key_id"] == key_id and record["purpose"] == purpose and
+                     record["scope"] == scope), None)
+        if item is None:
+            return {"classification": "UNKNOWN_KEY", "trusted": False,
+                    "key": None, "record": None}
+        classification = {"ACTIVE": "TRUSTED_ACTIVE", "RETIRED": "SIGNED_BY_RETIRED_KEY",
+                          "REVOKED": "SIGNED_BY_REVOKED_KEY"}[item["status"]]
+        return {"classification": classification, "trusted": item["status"] in {"ACTIVE", "RETIRED"},
+                "key": signing.decode_verify_key(item["verify_key"]), "record": item}
 
     def key_record(self, key_id, purpose=None, scope=None):
         for item in self.latest_keys():

@@ -110,6 +110,39 @@ def test_rotation_retirement_and_revocation_semantics(registry):
         t.transition_keys(store.latest_keys(), signing.key_fingerprint(key_a.verify_key), "RETIRED", generation + 1, "undo")
 
 
+def test_exact_release_binding_and_historical_key_classification(registry):
+    key, _ = signing.generate_signing_keypair()
+    issued = add_key(registry, key)
+    store, root = registry[1], registry[2]
+    binding = store.binding_for_release(issued)
+    assert store.resolve_binding(binding) == issued
+    at_issuance = store.classify_key_at(
+        binding, signing.key_fingerprint(key.verify_key), "SNAPSHOT_SIGNER", "default")
+    assert at_issuance["classification"] == "TRUSTED_ACTIVE"
+
+    generation = store.verify_chain()["count"] + 1
+    keys = t.transition_keys(store.latest_keys(), signing.key_fingerprint(key.verify_key),
+                             "RETIRED", generation, "rotation pending")
+    store.create_release(root, "security", keys, kind="UPDATE", when=WHEN)
+    assert store.classify_key(signing.key_fingerprint(key.verify_key),
+                              "SNAPSHOT_SIGNER", "default")["classification"] == "SIGNED_BY_RETIRED_KEY"
+    assert store.classify_key_at(
+        binding, signing.key_fingerprint(key.verify_key), "SNAPSHOT_SIGNER", "default"
+    )["classification"] == "TRUSTED_ACTIVE"
+
+
+@pytest.mark.parametrize("field,value", [
+    ("registry_id", "other"), ("generation", 99),
+    ("release_id", "TRR-" + "0" * 64), ("release_digest", "0" * 64),
+    ("root_key_id", "SHA256:" + "0" * 64),
+])
+def test_exact_release_binding_rejects_mismatch(registry, field, value):
+    binding = registry[1].binding_for_release(registry[4])
+    binding[field] = value
+    with pytest.raises(t.TrustRegistryError, match="registry release binding mismatch"):
+        registry[1].resolve_binding(binding)
+
+
 def test_snapshot_creation_rotation_and_historical_verification(registry, tmp_path):
     key_a, _ = signing.generate_signing_keypair(); add_key(registry, key_a)
     ws = IncidentWorkspace.declare(registry[0], title="Trust snapshot", severity="SEV2", actor="analyst")
