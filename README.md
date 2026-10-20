@@ -378,8 +378,10 @@ cannot sign new snapshots or receipts. REVOKED keys remain recorded and their
 signatures are reported as cryptographically meaningful but untrusted. Protect the
 registry root pin and expected-tip history independently. See the
 [signed trust-registry specification](docs/specs/signed-trust-registry-v1.md).
-The next compatible format milestone is defined in the
-[trust-bound artifact v2 specification](docs/specs/trust-bound-artifacts-v2.md).
+Snapshot v2 now binds each new registry-backed checkpoint to the exact authenticated
+release that authorized its signer. Legacy-pin workspaces continue to emit v1, and mixed
+chains permit only the one-way v1-to-v2 migration. Anchor receipt v2 is the next milestone
+in the [trust-bound artifact v2 specification](docs/specs/trust-bound-artifacts-v2.md).
 
 ## Verification
 
@@ -392,7 +394,7 @@ Baseline test gate:
 Current complete regression gate:
 
 ```text
-710 passed, 1 skipped, 28 warnings, 6 subtests passed
+724 passed, 1 skipped, 28 warnings, 6 subtests passed
 ```
 
 The gate includes the signed trust-registry, snapshot, anchor, GCS, incident, CLI,

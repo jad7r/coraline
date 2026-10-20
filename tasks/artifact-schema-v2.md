@@ -13,11 +13,11 @@ Use red-first tests for each phase and keep v1 fixtures immutable.
 
 ## Phase 2 — snapshot v2
 
-- [ ] Add v2 parsing, signing, IDs, and registry binding.
-- [ ] Emit v1 only in legacy-pin mode and v2 whenever a registry is installed.
-- [ ] Verify v1-to-v2 migration, forbid v2-to-v1 downgrade, and enforce
+- [x] Add v2 parsing, signing, IDs, and registry binding.
+- [x] Emit v1 only in legacy-pin mode and v2 whenever a registry is installed.
+- [x] Verify v1-to-v2 migration, forbid v2-to-v1 downgrade, and enforce
   nondecreasing bound generations.
-- [ ] Preserve current revocation behavior against the newest trusted release.
+- [x] Preserve current revocation behavior against the newest trusted release.
 
 ## Phase 3 — anchor receipt v2
 

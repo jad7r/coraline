@@ -15,7 +15,9 @@ from core.evidence._util import canonical_json, to_iso
 from core.evidence.integrity import signing
 
 DOMAIN = "coreline.incident-snapshot.v1"
+DOMAIN_V2 = "coreline.incident-snapshot.v2"
 PREFIX = (DOMAIN + "\0").encode()
+PREFIX_V2 = (DOMAIN_V2 + "\0").encode()
 ID_RE = re.compile(r"SNP-[0-9a-f]{64}\Z")
 HASH_RE = re.compile(r"[0-9a-f]{64}\Z")
 SOURCES = {
@@ -40,6 +42,7 @@ PAYLOAD_FIELDS = {
     "audit_head_hash", "audit_length", "incident_state_digest", "record_count",
     "records", "signing_key_id", "signature_algorithm", "final",
 }
+PAYLOAD_FIELDS_V2 = PAYLOAD_FIELDS | {"registry_binding"}
 MAX_BYTES = 64 * 1024 * 1024
 
 
@@ -232,6 +235,19 @@ def snapshot_digest(envelope):
     return _hash(canonical_bytes(envelope))
 
 
+def _binding_shape_valid(binding):
+    try:
+        from .trust_registry import BINDING_FIELDS, REGISTRY_ID_RE, RELEASE_ID_RE
+        return (isinstance(binding, dict) and set(binding) == BINDING_FIELDS and
+                bool(REGISTRY_ID_RE.fullmatch(binding["registry_id"])) and
+                type(binding["generation"]) is int and binding["generation"] >= 1 and
+                bool(RELEASE_ID_RE.fullmatch(binding["release_id"])) and
+                bool(HASH_RE.fullmatch(binding["release_digest"])) and
+                isinstance(binding["root_key_id"], str) and bool(binding["root_key_id"]))
+    except Exception:
+        return False
+
+
 def verify_document(envelope, verify_key, *, incident_id=None, expected_id=None):
     """Portable verification against a caller-supplied pin; never consult local state."""
     result = {"structure_valid": False, "signer_trusted": False, "signature_valid": False, "errors": []}
@@ -239,8 +255,17 @@ def verify_document(envelope, verify_key, *, incident_id=None, expected_id=None)
         if not isinstance(envelope, dict) or set(envelope) != {"payload", "signature"}:
             raise ValueError()
         p = envelope["payload"]
-        if set(p) != PAYLOAD_FIELDS or p["domain"] != DOMAIN or type(p["schema_version"]) is not int or p["schema_version"] != 1:
+        version = p.get("schema_version") if isinstance(p, dict) else None
+        expected_fields = PAYLOAD_FIELDS if version == 1 else PAYLOAD_FIELDS_V2 if version == 2 else None
+        expected_domain = DOMAIN if version == 1 else DOMAIN_V2 if version == 2 else None
+        prefix = PREFIX if version == 1 else PREFIX_V2 if version == 2 else None
+        if (expected_fields is None or set(p) != expected_fields or p["domain"] != expected_domain or
+                type(version) is not int):
             raise ValueError()
+        if version == 2:
+            binding = p["registry_binding"]
+            if not _binding_shape_valid(binding):
+                raise ValueError()
         if p["signature_algorithm"] != "ed25519" or type(p["final"]) is not bool:
             raise ValueError()
         for field in ("sequence", "audit_length", "record_count"):
@@ -286,7 +311,7 @@ def verify_document(envelope, verify_key, *, incident_id=None, expected_id=None)
             raise ValueError()
         result["structure_valid"] = True
         result["signer_trusted"] = verify_key is not None and p["signing_key_id"] == signing.key_fingerprint(verify_key)
-        result["signature_valid"] = result["signer_trusted"] and signing.verify(PREFIX + canonical_bytes(p), signature, verify_key)
+        result["signature_valid"] = result["signer_trusted"] and signing.verify(prefix + canonical_bytes(p), signature, verify_key)
         if not result["signer_trusted"]:
             result["errors"].append("UNKNOWN SIGNER")
         elif not result["signature_valid"]:
@@ -324,8 +349,52 @@ class SnapshotStore:
                     "signature_valid": False, "signer_status": "REGISTRY_INVALID",
                     "errors": ["TRUST REGISTRY INVALID"]}
         if self.trust:
-            key_id = document.get("payload", {}).get("signing_key_id")
-            qualified = self.trust.classify_key(key_id, "SNAPSHOT_SIGNER", "default")
+            payload = document.get("payload", {})
+            key_id = payload.get("signing_key_id")
+            current = self.trust.classify_key(key_id, "SNAPSHOT_SIGNER", "default")
+            if payload.get("schema_version") == 2:
+                binding = payload.get("registry_binding")
+                if not _binding_shape_valid(binding):
+                    check = verify_document(document, current["key"], incident_id=self.ws.incident_id,
+                                            expected_id=expected_id)
+                    check.update(valid=False, issuance_authorized=False,
+                                 authorization_status="REGISTRY_BINDING_MISSING",
+                                 signer_status=current["classification"])
+                    check["errors"].append("REGISTRY_BINDING_MISSING")
+                    return check
+                try:
+                    issued = self.trust.classify_key_at(
+                        binding, key_id, "SNAPSHOT_SIGNER", "default")
+                except Exception:
+                    chain = self.trust.verify_chain()
+                    status = ("REGISTRY_RELEASE_UNKNOWN" if chain["valid"] and
+                              binding["generation"] > chain["count"] else
+                              "REGISTRY_BINDING_MISMATCH")
+                    check = verify_document(document, current["key"], incident_id=self.ws.incident_id,
+                                            expected_id=expected_id)
+                    check.update(valid=False, issuance_authorized=False,
+                                 authorization_status=status,
+                                 signer_status=current["classification"])
+                    check["errors"].append(status)
+                    return check
+                check = verify_document(document, issued["key"] or current["key"], incident_id=self.ws.incident_id,
+                                        expected_id=expected_id)
+                authorized = issued["classification"] == "TRUSTED_ACTIVE"
+                check["issuance_authorized"] = authorized
+                check["authorization_status"] = ("ISSUANCE_AUTHORIZED" if authorized else
+                                                   "SIGNER_NOT_ACTIVE_AT_ISSUANCE")
+                check["signer_status"] = current["classification"]
+                if not authorized:
+                    check["valid"] = False
+                    check["errors"].append("SIGNER_NOT_ACTIVE_AT_ISSUANCE")
+                if current["classification"] == "SIGNED_BY_REVOKED_KEY":
+                    check["valid"] = False
+                    check["errors"].append("SIGNED_BY_REVOKED_KEY")
+                elif not current["trusted"]:
+                    check["valid"] = False
+                    check["errors"].append(current["classification"])
+                return check
+            qualified = current
             check = verify_document(document, qualified["key"], incident_id=self.ws.incident_id,
                                     expected_id=expected_id)
             check["signer_status"] = qualified["classification"]
@@ -389,6 +458,20 @@ class SnapshotStore:
                                  p["previous_snapshot_id"] != previous["payload"]["snapshot_id"] or
                                  p["previous_snapshot_digest"] != snapshot_digest(previous)):
                     raise SnapshotError("snapshot predecessor mismatch")
+                if previous:
+                    before = previous["payload"]
+                    if before["schema_version"] == 2 and p["schema_version"] == 1:
+                        result["errors"].append("ARTIFACT_SCHEMA_DOWNGRADE")
+                        return result
+                    if before["schema_version"] == p["schema_version"] == 2:
+                        old_binding, new_binding = before["registry_binding"], p["registry_binding"]
+                        if (old_binding["registry_id"] != new_binding["registry_id"] or
+                                old_binding["root_key_id"] != new_binding["root_key_id"]):
+                            result["errors"].append("REGISTRY_BINDING_MISMATCH")
+                            return result
+                        if new_binding["generation"] < old_binding["generation"]:
+                            result["errors"].append("REGISTRY_GENERATION_ROLLBACK")
+                            return result
                 previous = document
             if expected_tip is not None and (previous is None or expected_tip not in
                                  (previous["payload"]["snapshot_id"], snapshot_digest(previous))):
@@ -472,7 +555,14 @@ class SnapshotStore:
                     raise SnapshotError("signed trust registry invalid")
                 if self.trust:
                     try:
-                        self.trust.authorize(signing_key, "SNAPSHOT_SIGNER", "default")
+                        active_key = self.trust.active_key("SNAPSHOT_SIGNER", "default")
+                        if (signing.key_fingerprint(signing_key.verify_key) !=
+                                signing.key_fingerprint(active_key)):
+                            raise SnapshotError("snapshot signing key is not the active registry key")
+                        registry_chain = self.trust.verify_chain()
+                        if not registry_chain["valid"] or registry_chain["latest"] is None:
+                            raise SnapshotError("signed trust registry invalid")
+                        registry_binding = self.trust.binding_for_release(registry_chain["latest"])
                         signing_verify_key = signing_key.verify_key
                     except Exception:
                         raise SnapshotError("snapshot signing key is not active in signed registry") from None
@@ -485,6 +575,8 @@ class SnapshotStore:
                 previous = chain["latest"]
                 if previous and previous["payload"]["final"]:
                     raise SnapshotError("final checkpoint already exists")
+                if previous and previous["payload"]["schema_version"] == 2 and not self.trust:
+                    raise SnapshotError("snapshot schema downgrade is forbidden")
                 if previous:
                     audit = self.ws._load_audit()
                     count = previous["payload"]["audit_length"]
@@ -493,14 +585,19 @@ class SnapshotStore:
                 if not self.ws.verify(include_snapshots=False, include_anchors=False)["ok"]:
                     raise SnapshotError("incident integrity verification failed")
                 captured = inventory(self.ws)
-                payload = {"domain": DOMAIN, "schema_version": 1, "incident_id": self.ws.incident_id,
+                version = 2 if self.trust else 1
+                payload = {"domain": DOMAIN_V2 if version == 2 else DOMAIN,
+                           "schema_version": version, "incident_id": self.ws.incident_id,
                            "sequence": chain["count"] + 1, "created_at": to_iso(when or datetime.now(timezone.utc)),
                            "created_by": actor, "previous_snapshot_id": previous["payload"]["snapshot_id"] if previous else None,
                            "previous_snapshot_digest": snapshot_digest(previous) if previous else None,
                            **captured, "signing_key_id": signing.key_fingerprint(signing_verify_key),
                            "signature_algorithm": "ed25519", "final": self.ws.is_sealed}
+                if version == 2:
+                    payload["registry_binding"] = registry_binding
                 payload["snapshot_id"] = snapshot_id(payload)
-                envelope = {"payload": payload, "signature": base64.b64encode(signing.sign(PREFIX + canonical_bytes(payload), signing_key)).decode("ascii")}
+                prefix = PREFIX_V2 if version == 2 else PREFIX
+                envelope = {"payload": payload, "signature": base64.b64encode(signing.sign(prefix + canonical_bytes(payload), signing_key)).decode("ascii")}
                 if not verify_document(envelope, signing_verify_key, incident_id=self.ws.incident_id)["valid"]:
                     raise SnapshotError("new snapshot verification failed")
                 if inventory(self.ws) != captured:

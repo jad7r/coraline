@@ -159,6 +159,132 @@ def test_snapshot_creation_rotation_and_historical_verification(registry, tmp_pa
     assert ws.verify_snapshot(second["payload"]["snapshot_id"])["signer_status"] == "TRUSTED_ACTIVE"
 
 
+def test_registry_snapshot_creation_emits_trust_bound_v2(registry):
+    key, _ = signing.generate_signing_keypair(); release = add_key(registry, key)
+    ws = IncidentWorkspace.declare(registry[0], title="Bound snapshot", severity="SEV2", actor="analyst")
+
+    document = ws.create_snapshot(key, "analyst", when=WHEN)
+    payload = document["payload"]
+
+    assert payload["domain"] == "coreline.incident-snapshot.v2"
+    assert payload["schema_version"] == 2
+    assert payload["registry_binding"] == registry[1].binding_for_release(release)
+    result = ws.verify_snapshot(payload["snapshot_id"])
+    assert result["valid"] and result["signature_valid"]
+    assert result["issuance_authorized"]
+    assert result["authorization_status"] == "ISSUANCE_AUTHORIZED"
+
+
+def test_snapshot_v2_uses_issuance_release_but_current_revocation_wins(registry):
+    key, _ = signing.generate_signing_keypair(); add_key(registry, key)
+    ws = IncidentWorkspace.declare(registry[0], title="Historical authorization", severity="SEV2", actor="analyst")
+    document = ws.create_snapshot(key, "analyst", when=WHEN)
+    store, root = registry[1], registry[2]
+
+    generation = store.verify_chain()["count"] + 1
+    retired = t.transition_keys(store.latest_keys(), signing.key_fingerprint(key.verify_key),
+                                "RETIRED", generation, "rotation pending")
+    store.create_release(root, "security", retired, kind="UPDATE", when=WHEN)
+    result = ws.verify_snapshot(document["payload"]["snapshot_id"])
+    assert result["valid"] and result["issuance_authorized"]
+
+    generation += 1
+    revoked = t.transition_keys(store.latest_keys(), signing.key_fingerprint(key.verify_key),
+                                "REVOKED", generation, "compromised")
+    store.create_release(root, "security", revoked, kind="REVOCATION", reason="compromised", when=WHEN)
+    result = ws.verify_snapshot(document["payload"]["snapshot_id"])
+    assert result["signature_valid"] and result["issuance_authorized"] and not result["valid"]
+    assert result["signer_status"] == "SIGNED_BY_REVOKED_KEY"
+
+
+def test_snapshot_chain_allows_v1_to_v2_but_rejects_schema_downgrade(tmp_path, monkeypatch):
+    monkeypatch.delenv("CORELINE_TRUST_EXPECTED_TIP", raising=False)
+    home = tmp_path / "home"
+    ws = IncidentWorkspace.declare(home, title="Migration", severity="SEV2", actor="analyst")
+    key, public = signing.generate_signing_keypair()
+    pin = home / "trust" / "snapshot.verify.json"
+    s._publish(pin, s.canonical_bytes({"algorithm": "ed25519", "verify_key": signing.encode_verify_key(public),
+                                      "fingerprint": signing.key_fingerprint(public)}), 0o644)
+    legacy_store = s.SnapshotStore(ws)
+    first = legacy_store.create(key, "analyst", WHEN)
+    assert first["payload"]["schema_version"] == 1
+
+    root, root_public = signing.generate_signing_keypair()
+    t.write_root_pin(t.root_path(home), "org-migration", root_public)
+    registry_store = t.TrustRegistryStore(t.releases_path(home), t.load_root_pin(t.root_path(home)))
+    registry_store.create_release(root, "security", [
+        t.make_key_record(public, "SNAPSHOT_SIGNER", "default", "snapshot", 1)
+    ], kind="BOOTSTRAP", when=WHEN)
+    current_store = s.SnapshotStore(ws)
+    second = current_store.create(key, "analyst", WHEN)
+    assert second["payload"]["schema_version"] == 2
+    assert current_store.verify_chain()["valid"]
+
+    with pytest.raises(s.SnapshotError, match="downgrade"):
+        legacy_store.create(key, "analyst", WHEN)
+
+
+def _resign_v2(document, key):
+    document = copy.deepcopy(document)
+    document["payload"]["snapshot_id"] = s.snapshot_id(document["payload"])
+    document["signature"] = base64.b64encode(signing.sign(
+        s.PREFIX_V2 + s.canonical_bytes(document["payload"]), key)).decode()
+    return document
+
+
+@pytest.mark.parametrize("damage,status", [
+    ("missing", "REGISTRY_BINDING_MISSING"),
+    ("mismatch", "REGISTRY_BINDING_MISMATCH"),
+    ("unknown", "REGISTRY_RELEASE_UNKNOWN"),
+])
+def test_snapshot_v2_binding_failures_are_distinct(registry, damage, status):
+    key, _ = signing.generate_signing_keypair(); add_key(registry, key)
+    ws = IncidentWorkspace.declare(registry[0], title="Binding failures", severity="SEV2", actor="analyst")
+    store = s.SnapshotStore(ws)
+    document = ws.create_snapshot(key, "analyst", when=WHEN)
+    binding = document["payload"]["registry_binding"]
+    if damage == "missing":
+        del document["payload"]["registry_binding"]
+    elif damage == "mismatch":
+        binding["release_digest"] = "0" * 64
+    else:
+        binding["generation"] = 999
+        binding["release_id"] = "TRR-" + "0" * 64
+        binding["release_digest"] = "0" * 64
+    result = store._check_document(_resign_v2(document, key))
+    assert not result["valid"] and result["authorization_status"] == status
+    assert status in result["errors"]
+
+
+def test_snapshot_v2_rejects_signer_not_active_in_bound_release(registry):
+    key, _ = signing.generate_signing_keypair(); add_key(registry, key)
+    ws = IncidentWorkspace.declare(registry[0], title="Issuance status", severity="SEV2", actor="analyst")
+    store = s.SnapshotStore(ws)
+    document = ws.create_snapshot(key, "analyst", when=WHEN)
+    document["payload"]["registry_binding"] = registry[1].binding_for_release(registry[4])
+    result = store._check_document(_resign_v2(document, key))
+    assert result["signature_valid"] and not result["valid"]
+    assert result["authorization_status"] == "SIGNER_NOT_ACTIVE_AT_ISSUANCE"
+
+
+def test_snapshot_v2_chain_rejects_registry_generation_rollback(registry):
+    key, _ = signing.generate_signing_keypair(); release_two = add_key(registry, key)
+    anchor, _ = signing.generate_signing_keypair()
+    add_key(registry, anchor, "ANCHOR_SIGNER", "vault-a", "anchor-a")
+    ws = IncidentWorkspace.declare(registry[0], title="Binding rollback", severity="SEV2", actor="analyst")
+    store = s.SnapshotStore(ws)
+    first = ws.create_snapshot(key, "analyst", when=WHEN)
+    assert first["payload"]["registry_binding"]["generation"] == 3
+    second = ws.create_snapshot(key, "analyst", when=WHEN)
+    old_path = store.directory / f"{second['payload']['snapshot_id']}.json"
+    old_path.unlink()
+    second["payload"]["registry_binding"] = registry[1].binding_for_release(release_two)
+    second = _resign_v2(second, key)
+    (store.directory / f"{second['payload']['snapshot_id']}.json").write_bytes(s.canonical_bytes(second))
+    result = store.verify_chain()
+    assert not result["valid"] and "REGISTRY_GENERATION_ROLLBACK" in result["errors"]
+
+
 def test_revoked_snapshot_is_qualified_and_fails_trust(registry):
     key, _ = signing.generate_signing_keypair(); add_key(registry, key)
     ws = IncidentWorkspace.declare(registry[0], title="Revoked", severity="SEV2", actor="analyst")
